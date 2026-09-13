@@ -77,12 +77,13 @@ class MultiAccountFailoverTests(unittest.IsolatedAsyncioTestCase):
         auth = FakeAuthManager()
         seen: list[tuple[str, str]] = []  # (token, requested-model-in-body)
 
+        primary_model = bridge_client.map_model_name("gemini-3.7-flash")
         def handler(request: httpx.Request) -> httpx.Response:
             token = request.headers["Authorization"].removeprefix("Bearer ")
             body = json.loads(request.content)
             model = body.get("model", "")
             seen.append((token, model))
-            if token == "token-a" and model == "gemini-3-flash-agent":
+            if token == "token-a" and model == primary_model:
                 return httpx.Response(
                     429,
                     headers={"Retry-After": "60"},
@@ -118,7 +119,7 @@ class MultiAccountFailoverTests(unittest.IsolatedAsyncioTestCase):
             result["choices"][0]["message"]["content"], "SAME_ACCOUNT_CLAUDE_OK"
         )
         self.assertEqual(
-            seen, [("token-a", "gemini-3-flash-agent"), ("token-a", "claude-sonnet-4-6")]
+            seen, [( "token-a", primary_model), ("token-a", "claude-sonnet-4-6")]
         )
         # The account was NOT cooled down / rotated away from — it still had
         # usable Claude quota, so mark_account_unavailable must not fire.

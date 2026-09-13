@@ -162,6 +162,7 @@ VALID_CODE_ASSIST_MODELS = {
 # map_model_name), one fallback hop per requested model.
 IN_ACCOUNT_MODEL_FALLBACK = {
     "gemini-3-flash-agent": "claude-sonnet-4-6",
+    "gemini-3.6-flash-medium": "claude-sonnet-4-6",
 }
 
 

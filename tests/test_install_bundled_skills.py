@@ -29,6 +29,7 @@ class BundledSkillInstallTests(unittest.TestCase):
                 [
                     "antigravity-oauth-bridge",
                     "hermes-provider-management",
+                    "hermes-subagent-orchestration",
                     "project-harness-engineering",
                 ],
             )
