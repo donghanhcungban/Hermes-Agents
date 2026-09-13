@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -24,8 +25,21 @@ def get_hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
+def _get_skill_name(skill_file: Path) -> str | None:
+    try:
+        content = skill_file.read_text(encoding="utf-8")
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            match = re.search(r"^name:\s*['\"]?([A-Za-z0-9_\-]+)['\"]?", parts[1], re.MULTILINE)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
 def install_bundled_skills(hermes_dir: Path) -> list[str]:
-    """Đồng bộ skill đóng gói, không chạm vào skill khác của người dùng."""
+    """Đồng bộ skill đóng gói, loại bỏ duplicate theo tên skill ở thư mục con, không chạm vào skill khác của người dùng."""
     source_root = PACKAGE_DIR / "skills"
     destination_root = hermes_dir / "skills"
     if not source_root.is_dir():
@@ -33,16 +47,29 @@ def install_bundled_skills(hermes_dir: Path) -> list[str]:
 
     installed: list[str] = []
     for source_skill in sorted(source_root.iterdir()):
-        if not source_skill.is_dir() or not (source_skill / "SKILL.md").is_file():
+        source_md = source_skill / "SKILL.md"
+        if not source_skill.is_dir() or not source_md.is_file():
             continue
         destination_root.mkdir(parents=True, exist_ok=True)
-        destination_skill = destination_root / source_skill.name
+        destination_skill = (destination_root / source_skill.name).resolve()
+        source_name = _get_skill_name(source_md) or source_skill.name
+
+        # Dọn dẹp bản sao trùng tên (dựa trên YAML name) nằm ở các thư mục con
+        for existing_file in list(destination_root.rglob("SKILL.md")):
+            parent = existing_file.parent
+            if parent.resolve() != destination_skill:
+                existing_name = _get_skill_name(existing_file)
+                if existing_name == source_name:
+                    if parent.is_dir():
+                        shutil.rmtree(parent)
+
         if destination_skill.is_symlink():
             destination_skill.unlink()
         elif destination_skill.is_dir():
             shutil.rmtree(destination_skill)
         elif destination_skill.exists():
             destination_skill.unlink()
+
         shutil.copytree(source_skill, destination_skill)
         installed.append(source_skill.name)
     return installed

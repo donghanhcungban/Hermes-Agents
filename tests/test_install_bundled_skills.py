@@ -41,6 +41,18 @@ class BundledSkillInstallTests(unittest.TestCase):
 
             self.assertTrue((slot / "SKILL.md").is_file())
 
+    def test_removes_duplicate_category_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            duplicate = hermes_home / "skills" / "autonomous-ai-agents" / "hermes-provider-management" / "SKILL.md"
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_text("---\nname: hermes-provider-management\ndescription: test\n---\n", encoding="utf-8")
+
+            INSTALLER.install_bundled_skills(hermes_home)
+
+            self.assertFalse(duplicate.exists())
+            self.assertTrue((hermes_home / "skills" / "hermes-provider-management" / "SKILL.md").is_file())
+
     def test_bundle_frontmatter_names_match_directories(self) -> None:
         for skill_dir in sorted((ROOT / "skills").iterdir()):
             skill_file = skill_dir / "SKILL.md"
