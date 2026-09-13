@@ -45,21 +45,27 @@ FALLBACK_CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com/v1internal"
 ANTIGRAVITY_SUPPORTED_MODELS = [
     {
         "id": "gemini-3.7-flash",
-        "name": "Gemini 3.7 Flash High",
-        "code_assist_model": "gemini-3-flash-agent",
-        "description": "Gemini 3.7 Flash with high reasoning budget and full tool use.",
+        "name": "Gemini 3.7 Flash (via 3.6)",
+        "code_assist_model": "gemini-3.6-flash-medium",
+        "description": "Gemini 3.7 Flash — routed via 3.6-flash-medium (gemini-3-flash-agent offline).",
     },
     {
         "id": "gemini-3.7-flash-medium",
-        "name": "Gemini 3.7 Flash Medium",
-        "code_assist_model": "gemini-3-flash-agent",
-        "description": "Gemini 3.7 Flash with medium reasoning budget.",
+        "name": "Gemini 3.7 Flash Medium (via 3.6)",
+        "code_assist_model": "gemini-3.6-flash-medium",
+        "description": "Gemini 3.7 Flash Medium — routed via 3.6-flash-medium.",
     },
     {
         "id": "gemini-3.7-flash-low",
-        "name": "Gemini 3.7 Flash Low",
-        "code_assist_model": "gemini-3-flash-agent",
-        "description": "Gemini 3.7 Flash with minimal reasoning latency.",
+        "name": "Gemini 3.7 Flash Low (via 3.6)",
+        "code_assist_model": "gemini-3.6-flash-medium",
+        "description": "Gemini 3.7 Flash Low — routed via 3.6-flash-medium.",
+    },
+    {
+        "id": "gemini-3.8-flash",
+        "name": "Gemini 3.8 Flash Low",
+        "code_assist_model": "gemini-3.6-flash-medium",
+        "description": "Gemini 3.8 Flash (low) — temporarily routed via 3.6-flash-medium until the real code_assist_model ID is confirmed.",
     },
     {
         "id": "gemini-3.6-flash",
@@ -101,15 +107,19 @@ ANTIGRAVITY_SUPPORTED_MODELS = [
 
 MODEL_ALIAS_MAP = {
     # Gemini 3.7 Flash — IDE shows "Gemini 3.7 Flash Medium"
-    "gemini-3.7-flash": "gemini-3-flash-agent",
-    "gemini-3-flash": "gemini-3-flash-agent",
-    "gemini-3.7-flash-high": "gemini-3-flash-agent",
-    "gemini-3.7-flash-medium": "gemini-3-flash-agent",
-    "gemini-3.7-flash-low": "gemini-3-flash-agent",
-    # Gemini 3.7 Pro — NOT in IDE, map to flash as fallback
-    "gemini-3.7-pro": "gemini-3-flash-agent",
-    "gemini-3-pro": "gemini-3-flash-agent",
-    "gemini-pro": "gemini-3-flash-agent",
+    "gemini-3.7-flash": "gemini-3.6-flash-medium",
+    "gemini-3-flash": "gemini-3.6-flash-medium",
+    "gemini-3.7-flash-high": "gemini-3.6-flash-medium",
+    "gemini-3.7-flash-medium": "gemini-3.6-flash-medium",
+    "gemini-3.7-flash-low": "gemini-3.6-flash-medium",
+    # Gemini 3.7 Pro — NOT in IDE, map to 3.6 as fallback
+    "gemini-3.7-pro": "gemini-3.6-flash-medium",
+    "gemini-3-pro": "gemini-3.6-flash-medium",
+    "gemini-pro": "gemini-3.6-flash-medium",
+    # Gemini 3.8 Flash — real code_assist_model ID not yet confirmed; temp route via 3.6-flash-medium
+    "gemini-3.8-flash": "gemini-3.6-flash-medium",
+    "gemini-3.8-flash-low": "gemini-3.6-flash-medium",
+    "gemini-3.8-flash-tiered": "gemini-3.6-flash-medium",
     # Gemini 3.6 Flash
     "gemini-3.6-flash": "gemini-3.6-flash-medium",
     "gemini-3.6-flash-medium": "gemini-3.6-flash-medium",
@@ -152,6 +162,7 @@ VALID_CODE_ASSIST_MODELS = {
 # map_model_name), one fallback hop per requested model.
 IN_ACCOUNT_MODEL_FALLBACK = {
     "gemini-3-flash-agent": "claude-sonnet-4-6",
+    "gemini-3.6-flash-medium": "claude-sonnet-4-6",
 }
 
 
@@ -359,7 +370,20 @@ def _sanitize_gemini_schema_node(node: Any) -> Any:
     if not isinstance(node, dict):
         return node
 
-    out: Dict[str, Any] = {k: _sanitize_gemini_schema_node(v) for k, v in node.items()}
+    out: Dict[str, Any] = {
+        k: _sanitize_gemini_schema_node(v)
+        for k, v in node.items()
+        if k not in ("additionalProperties", "$schema", "patternProperties")
+    }
+
+    if "exclusiveMinimum" in out:
+        excl_min = out.pop("exclusiveMinimum")
+        if "minimum" not in out and isinstance(excl_min, (int, float)):
+            out["minimum"] = excl_min
+    if "exclusiveMaximum" in out:
+        excl_max = out.pop("exclusiveMaximum")
+        if "maximum" not in out and isinstance(excl_max, (int, float)):
+            out["maximum"] = excl_max
 
     for key in ("anyOf", "oneOf"):
         variants = out.get(key)
