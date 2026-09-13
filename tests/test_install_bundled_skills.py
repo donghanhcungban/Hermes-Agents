@@ -24,15 +24,8 @@ class BundledSkillInstallTests(unittest.TestCase):
 
             installed = INSTALLER.install_bundled_skills(hermes_home)
 
-            self.assertEqual(
-                installed,
-                [
-                    "antigravity-oauth-bridge",
-                    "hermes-provider-management",
-                    "hermes-subagent-orchestration",
-                    "project-harness-engineering",
-                ],
-            )
+            expected = sorted([d.name for d in (ROOT / "skills").iterdir() if d.is_dir() and (d / "SKILL.md").is_file()])
+            self.assertEqual(installed, expected)
             self.assertEqual(user_skill.read_text(encoding="utf-8"), "private\n")
             for name in installed:
                 self.assertTrue((hermes_home / "skills" / name / "SKILL.md").is_file())
