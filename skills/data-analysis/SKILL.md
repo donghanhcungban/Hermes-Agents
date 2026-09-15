@@ -1,6 +1,6 @@
 ---
 name: data-analysis
-description: "Vendored from oh-my-hermes: Data Analysis"
+description: "Analyse datasets: statistics, visualisation, insight report."
 ---
 
 # Data Analysis

@@ -1,6 +1,6 @@
 ---
 name: tech-debt-audit
-description: "Vendored from oh-my-hermes: Tech Debt Audit"
+description: "Audit and prioritise technical debt across a codebase."
 ---
 
 # Tech Debt Audit
