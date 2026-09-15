@@ -111,6 +111,29 @@ def main():
     installed_skills = install_bundled_skills(hermes_dir)
     print(f"\n[4/6] Installed bundled skills: {', '.join(installed_skills) or 'none'}")
 
+    # 4b. Install grill-tab plugin (vendor bundled from thanhan-a17/grill-tab, MIT)
+    grill_src = PACKAGE_DIR / "plugins" / "grill-tab"
+    if grill_src.is_dir():
+        grill_dest = hermes_dir / "plugins" / "grill-tab"
+        grill_desktop_dest = hermes_dir / "desktop-plugins" / "grill-tab"
+        print(f"\n[4b] Installing grill-tab plugin to {grill_dest}...")
+        if grill_dest.exists():
+            shutil.rmtree(grill_dest)
+        shutil.copytree(grill_src, grill_dest, ignore=shutil.ignore_patterns("tests", "docs", "scripts", "desktop"))
+        grill_desktop_dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(grill_src / "desktop" / "plugin.js", grill_desktop_dest / "plugin.js")
+        # Write .hermes-package.json for desktop plugin discovery
+        import json
+        (grill_desktop_dest / ".hermes-package.json").write_text(
+            json.dumps({"name": "grill-tab", "version": "0.2.0", "main": "plugin.js"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print("      + grill-tab plugin + desktop plugin installed")
+        print("      + Set auxiliary.grill_tab in config.yaml to choose its model")
+        print("        (a fast cheap model is recommended: gemini-3-flash / gpt-4o-mini)")
+    else:
+        print("\n[4b] grill-tab plugin source not found — skipping")
+
     # 5. In-Repo synchronization (if executed from inside a hermes-agent git repo)
     repo_candidate = PACKAGE_DIR.parent
     if (repo_candidate / "run_agent.py").is_file() and (repo_candidate / "hermes_cli").is_dir():
