@@ -1,6 +1,6 @@
 ---
 name: verification-gate
-description: "Vendored from oh-my-hermes: Verification Gate"
+description: "Gate a change on observable pass criteria before shipping."
 ---
 
 # Verification Gate

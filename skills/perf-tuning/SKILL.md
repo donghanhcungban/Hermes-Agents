@@ -1,6 +1,6 @@
 ---
 name: perf-tuning
-description: "Vendored from oh-my-hermes: Ultraperf"
+description: "Profile and tune performance: CPU, memory, I/O bottlenecks."
 ---
 
 # Ultraperf

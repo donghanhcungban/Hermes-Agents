@@ -1,6 +1,6 @@
 ---
 name: refactor-plan
-description: "Vendored from oh-my-hermes: Refactor Plan"
+description: "Plan safe refactors: scope, steps, rollback, verification."
 ---
 
 # Refactor Plan
