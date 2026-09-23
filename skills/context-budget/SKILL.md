@@ -1,6 +1,6 @@
 ---
 name: context-budget
-description: "Vendored from oh-my-hermes: Context"
+description: "Manage context window budget: compression, eviction, priority."
 ---
 
 # Context

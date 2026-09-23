@@ -1,6 +1,6 @@
 ---
 name: accessibility-audit
-description: "Vendored from oh-my-hermes: Accessibility Audit"
+description: "Audit web accessibility: WCAG compliance, ARIA, keyboard nav."
 ---
 
 # Accessibility Audit
