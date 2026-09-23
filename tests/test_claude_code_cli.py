@@ -12,10 +12,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bridge.claude_code import CLI_MODEL_ALIASES, ClaudeCodeCliClient, ClaudeCodeCliError
+from bridge.claude_code import (
+    CLI_MODEL_ALIASES,
+    ClaudeCodeCliClient,
+    ClaudeCodeCliError,
+    discover_models_from_help,
+)
 
 
 class ClaudeCodeCliClientTests(unittest.TestCase):
+    def test_discovers_new_aliases_and_full_model_ids_from_cli_help(self) -> None:
+        help_text = """
+          --model <model>  Provide an alias (e.g. 'fable', 'opus', or 'sonnet')
+                           or a full name (e.g. 'claude-fable-5' or 'claude-opus-5').
+          --verbose        Show verbose output
+        """
+
+        self.assertEqual(
+            {"claude-fable-5", "claude-opus-5", "fable", "haiku", "opus", "sonnet"},
+            set(discover_models_from_help(help_text)),
+        )
+
     def test_supports_the_four_configured_claude_code_model_aliases(self) -> None:
         self.assertEqual(
             {"fable", "opus", "sonnet", "haiku"},
@@ -25,7 +42,7 @@ class ClaudeCodeCliClientTests(unittest.TestCase):
     def test_returns_openai_content_from_structured_cli_result(self) -> None:
         observed: list[list[str]] = []
 
-        async def runner(command: list[str], prompt: str) -> tuple[int, str, str]:
+        async def runner(command: list[str], prompt: str, extra_env: dict | None = None) -> tuple[int, str, str]:
             observed.append(command)
             self.assertIn("Xin chào", prompt)
             return 0, json.dumps(
@@ -47,7 +64,7 @@ class ClaudeCodeCliClientTests(unittest.TestCase):
         self.assertIn("--no-session-persistence", observed[0])
 
     def test_returns_openai_tool_call_without_executing_claude_tools(self) -> None:
-        async def runner(command: list[str], prompt: str) -> tuple[int, str, str]:
+        async def runner(command: list[str], prompt: str, extra_env: dict | None = None) -> tuple[int, str, str]:
             self.assertIn("get_weather", prompt)
             return 0, json.dumps(
                 {
@@ -84,7 +101,7 @@ class ClaudeCodeCliClientTests(unittest.TestCase):
         self.assertEqual(json.loads(message["tool_calls"][0]["function"]["arguments"]), {"city": "Hà Nội"})
 
     def test_rejects_tool_not_offered_by_hermes(self) -> None:
-        async def runner(command: list[str], prompt: str) -> tuple[int, str, str]:
+        async def runner(command: list[str], prompt: str, extra_env: dict | None = None) -> tuple[int, str, str]:
             return 0, json.dumps(
                 {"structured_output": {"content": "", "tool_calls": [{"name": "shell", "arguments": {}}]}}
             ), ""
@@ -101,7 +118,7 @@ class ClaudeCodeCliClientTests(unittest.TestCase):
             )
 
     def test_reports_missing_claude_cli(self) -> None:
-        async def runner(command: list[str], prompt: str) -> tuple[int, str, str]:
+        async def runner(command: list[str], prompt: str, extra_env: dict | None = None) -> tuple[int, str, str]:
             raise FileNotFoundError(command[0])
 
         client = ClaudeCodeCliClient(runner=runner)
@@ -115,3 +132,4 @@ class ClaudeCodeCliClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

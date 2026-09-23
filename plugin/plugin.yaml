@@ -34,3 +34,14 @@ models:
     name: Claude Code Sonnet 5 (Subscription CLI)
   - id: haiku
     name: Claude Code Haiku (Subscription CLI)
+
+  - id: gpt-6-astra
+    name: OpenAI Codex GPT-6 Astra (Subscription CLI)
+  - id: o3-mini
+    name: OpenAI Codex o3-mini (Subscription CLI)
+  - id: o3
+    name: OpenAI Codex o3 (Subscription CLI)
+  - id: gpt-4o
+    name: OpenAI Codex GPT-4o (Subscription CLI)
+  - id: gpt-4o-mini
+    name: OpenAI Codex GPT-4o Mini (Subscription CLI)

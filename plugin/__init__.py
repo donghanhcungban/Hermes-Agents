@@ -1,4 +1,12 @@
-"""Antigravity (OAuth Bridge) provider profile for Hermes Agent."""
+"""Multi-provider bridge profiles for Hermes Agent.
+
+Providers:
+  - Antigravity (Google OAuth): Gemini + Claude
+  - Claude Code CLI: Claude subscription via `claude -p`
+  - Codex CLI: ChatGPT/OpenAI subscription via `codex exec`
+
+All three route through the shared bridge on port 8100.
+"""
 
 from __future__ import annotations
 
@@ -49,6 +57,27 @@ class ClaudeCodeCliProfile(ProviderProfile):
         return {}
 
 
+class CodexCliProfile(ProviderProfile):
+    """OpenAI Codex CLI (ChatGPT subscription) through the local bridge.
+
+    Supports multi-account round-robin rotation via AccountPool when more than
+    one Codex account is registered (``manage.py add-account codex``).
+    """
+
+    def build_extra_body(self, **context: Any) -> dict[str, Any]:
+        try:
+            from hermes_constants import get_hermes_home
+
+            bridge_root = get_hermes_home() / "bridge" / "antigravity"
+            if bridge_root.is_dir() and str(bridge_root) not in sys.path:
+                sys.path.insert(0, str(bridge_root))
+            from tools.antigravity_bridge.server import ensure_codex_bridge_running
+            ensure_codex_bridge_running()
+        except Exception:
+            pass
+        return {}
+
+
 antigravity = AntigravityProfile(
     name="antigravity",
     aliases=("google-antigravity", "antigravity-oauth"),
@@ -57,9 +86,6 @@ antigravity = AntigravityProfile(
     signup_url="https://antigravity.google",
     env_vars=("ANTIGRAVITY_API_KEY",),
     base_url="http://127.0.0.1:8100/v1",
-    # Hermes auto-registers third-party model providers in the picker/runtime
-    # only through the generic API-key path. The value authenticates the local
-    # OpenAI-compatible bridge; Google OAuth remains managed by the bridge.
     auth_type="api_key",
     fallback_models=(
         "gemini-3.7-flash",
@@ -82,7 +108,8 @@ claude_code_cli = ClaudeCodeCliProfile(
     name="claude-code-cli",
     aliases=("claude-code", "claude-subscription"),
     display_name="Claude Code (Subscription CLI)",
-    description="Local Claude Code CLI bridge using an authenticated Claude subscription",
+    description="Local Claude Code CLI bridge using an authenticated Claude subscription. "
+                "Supports multiple accounts via CLAUDE_HOME isolation.",
     signup_url="https://claude.ai",
     env_vars=("CLAUDE_CODE_CLI_KEY",),
     base_url="http://127.0.0.1:8100/v1/claude-code",
@@ -93,3 +120,21 @@ claude_code_cli = ClaudeCodeCliProfile(
 )
 
 register_provider(claude_code_cli)
+
+codex_cli = CodexCliProfile(
+    name="codex-cli",
+    aliases=("codex", "openai-codex", "codex-subscription"),
+    display_name="Codex CLI (ChatGPT Subscription)",
+    description="OpenAI Codex CLI bridge using a ChatGPT Plus/Team subscription. "
+                "Supports multiple accounts via CODEX_HOME isolation.",
+    signup_url="https://chatgpt.com",
+    env_vars=("CODEX_CLI_KEY",),
+    base_url="http://127.0.0.1:8100/v1/codex",
+    auth_type="api_key",
+    fallback_models=("gpt-6-astra", "o3-mini", "o3", "gpt-4o"),
+    default_aux_model="gpt-6-astra",
+    supports_vision=False,
+)
+
+register_provider(codex_cli)
+

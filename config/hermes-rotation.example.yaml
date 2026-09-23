@@ -22,6 +22,22 @@ fallback_providers:
     base_url: https://opencode.ai/zen/v1
     api_mode: chat_completions
 
+credential_pool_strategies:
+  # Giữ tài khoản ưu tiên cho đến khi lỗi quota/rate-limit/auth rồi mới xoay.
+  openai-codex: fill_first
+  anthropic: fill_first
+  groq: fill_first
+
+providers:
+  groq:
+    name: Groq Cloud
+    base_url: https://api.groq.com/openai/v1
+  ollama-lan-1:
+    name: Ollama LAN 1
+    base_url: http://127.0.0.1:11434/v1
+  # Có thể khai báo thêm ollama-lan-2, ollama-lan-3... rồi đặt từng
+  # instance thành một hop fallback. Ollama không có khái niệm tài khoản.
+
 compression:
   enabled: true
   threshold: 0.7

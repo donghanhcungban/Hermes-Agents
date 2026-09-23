@@ -153,6 +153,51 @@ VALID_CODE_ASSIST_MODELS = {
     "claude-sonnet-4-6",
 }
 
+_MODEL_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{1,127}$")
+
+
+def parse_available_models(payload: Any) -> List[Dict[str, Any]]:
+    """Validate and normalize Antigravity's live model catalog."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), dict):
+        return []
+
+    selectable: set[str] = set()
+    for model_sort in payload.get("agentModelSorts") or []:
+        if not isinstance(model_sort, dict):
+            continue
+        for group in model_sort.get("groups") or []:
+            if isinstance(group, dict):
+                selectable.update(
+                    model_id
+                    for model_id in group.get("modelIds") or []
+                    if isinstance(model_id, str)
+                )
+    tiered = payload.get("tieredModelIds")
+    if isinstance(tiered, dict):
+        for model_ids in tiered.values():
+            if isinstance(model_ids, list):
+                selectable.update(model_id for model_id in model_ids if isinstance(model_id, str))
+
+    normalized: List[Dict[str, Any]] = []
+    for model_id in sorted(selectable):
+        details = payload["models"].get(model_id)
+        if (
+            not _MODEL_ID_PATTERN.fullmatch(model_id)
+            or not isinstance(details, dict)
+            or details.get("isInternal") is True
+        ):
+            continue
+        normalized.append(
+            {
+                "id": model_id,
+                "name": str(details.get("displayName") or model_id),
+                "code_assist_model": model_id,
+                "description": str(details.get("description") or "Discovered from Antigravity."),
+            }
+        )
+    return normalized
+
+
 # In-account model fallback: when the requested model's quota is exhausted on
 # an account that still has OTHER model quota available, try that sibling
 # model on the SAME account before rotating to a different Google account.
@@ -166,9 +211,19 @@ IN_ACCOUNT_MODEL_FALLBACK = {
 }
 
 
+def _is_model_unsupported(response: httpx.Response) -> bool:
+    """Whether one account rejects a model while remaining usable for others."""
+    if response.status_code not in {400, 404}:
+        return False
+    body = response.text.lower()
+    return any(marker in body for marker in ("not found", "not supported", "unsupported", "invalid model"))
+
+
 def _should_fail_over(response: httpx.Response) -> bool:
     """Whether another OAuth account may recover this upstream failure."""
     if response.status_code in {401, 402, 403, 429} or response.status_code >= 500:
+        return True
+    if _is_model_unsupported(response):
         return True
     body = response.text.lower()
     return any(
@@ -183,8 +238,12 @@ def _should_fail_over(response: httpx.Response) -> bool:
     )
 
 
-def map_model_name(requested_model: str) -> str:
-    """Map user-requested model slug to Code Assist internal model identifier."""
+def map_model_name(
+    requested_model: str,
+    *,
+    available_models: set[str] | None = None,
+) -> str:
+    """Map a public slug to a validated Code Assist model identifier."""
     if not requested_model:
         return "gemini-3-flash-agent"
     normalized = requested_model.lower().strip()
@@ -192,7 +251,8 @@ def map_model_name(requested_model: str) -> str:
     if "/" in normalized:
         normalized = normalized.split("/", 1)[1]
     mapped = MODEL_ALIAS_MAP.get(normalized, normalized)
-    if mapped not in VALID_CODE_ASSIST_MODELS:
+    valid_models = VALID_CODE_ASSIST_MODELS | (available_models or set())
+    if mapped not in valid_models:
         logger.warning("Unknown model '%s' requested via Antigravity, falling back to gemini-3-flash-agent", requested_model)
         return "gemini-3-flash-agent"
     return mapped
@@ -503,10 +563,15 @@ def _extract_tool_calls_from_text(text: str) -> tuple[List[Dict[str, Any]], str]
 def build_code_assist_request(
     openai_payload: Dict[str, Any],
     project_id: str,
+    *,
+    available_models: set[str] | None = None,
 ) -> Dict[str, Any]:
     """Convert an OpenAI /v1/chat/completions payload to Code Assist envelope format."""
     messages = openai_payload.get("messages") or []
-    model_name = map_model_name(openai_payload.get("model") or "gemini-3.7-flash")
+    model_name = map_model_name(
+        openai_payload.get("model") or "gemini-3.7-flash",
+        available_models=available_models,
+    )
 
     system_text_parts: List[str] = []
     contents: List[Dict[str, Any]] = []
@@ -804,12 +869,111 @@ def translate_gemini_stream_event(
 class AntigravityClient:
     """HTTP Client executing requests against Google Code Assist backend."""
 
+    MODEL_CATALOG_TTL_SECONDS = 300.0
+    MODEL_CATALOG_MIN_REFRESH_INTERVAL_SECONDS = 10.0
+
     def __init__(self, auth_manager: Optional[AntigravityAuthManager] = None) -> None:
         self.auth_manager = auth_manager or AntigravityAuthManager()
         self._http = httpx.AsyncClient(timeout=120.0)
+        self._model_catalog: List[Dict[str, Any]] = list(ANTIGRAVITY_SUPPORTED_MODELS)
+        self._model_catalog_refreshed_at = 0.0
+        self._unsupported_models_by_project: Dict[str, set[str]] = {}
+        self._model_catalog_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def list_models(self, *, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Return a live catalog, refreshing from Google at most once per TTL."""
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._model_catalog_refreshed_at
+            and now - self._model_catalog_refreshed_at < self.MODEL_CATALOG_TTL_SECONDS
+        ):
+            return list(self._model_catalog)
+
+        async with self._model_catalog_lock:
+            now = time.monotonic()
+            # Coalesce back-to-back forced refreshes (e.g. from an
+            # unauthenticated `?refresh=1`) so a burst of requests cannot
+            # each trigger a fresh round of upstream discovery calls.
+            if (
+                self._model_catalog_refreshed_at
+                and now - self._model_catalog_refreshed_at < self.MODEL_CATALOG_MIN_REFRESH_INTERVAL_SECONDS
+            ):
+                return list(self._model_catalog)
+            if (
+                not force_refresh
+                and self._model_catalog_refreshed_at
+                and now - self._model_catalog_refreshed_at < self.MODEL_CATALOG_TTL_SECONDS
+            ):
+                return list(self._model_catalog)
+
+            try:
+                candidates = await asyncio.to_thread(
+                    self.auth_manager.resolve_credential_candidates
+                )
+            except Exception as exc:  # noqa: BLE001 - discovery must fall back safely
+                logger.warning("Could not resolve credentials for model discovery: %s", exc)
+                candidates = []
+
+            merged = {model["id"]: dict(model) for model in ANTIGRAVITY_SUPPORTED_MODELS}
+            for creds in candidates:
+                headers = build_antigravity_headers(creds.access_token, creds.project_id)
+                try:
+                    response = await self._http.post(
+                        f"{CODE_ASSIST_BASE_URL}:fetchAvailableModels",
+                        json={"project": creds.project_id},
+                        headers=headers,
+                    )
+                except Exception as exc:  # noqa: BLE001 - try the next account
+                    logger.warning("Antigravity model discovery failed: %s", exc)
+                    continue
+                if response.status_code != 200:
+                    logger.warning(
+                        "Antigravity model discovery returned HTTP %s",
+                        response.status_code,
+                    )
+                    continue
+                try:
+                    discovered = parse_available_models(response.json())
+                except (TypeError, ValueError):
+                    logger.warning("Antigravity model discovery returned invalid JSON")
+                    continue
+                merged.update({model["id"]: model for model in discovered})
+
+            self._model_catalog = [merged[model_id] for model_id in sorted(merged)]
+
+            self._model_catalog_refreshed_at = time.monotonic()
+            return list(self._model_catalog)
+
+    def _available_model_ids(self) -> set[str]:
+        return {
+            str(model["id"])
+            for model in self._model_catalog
+            if isinstance(model, dict) and isinstance(model.get("id"), str)
+        }
+
+    async def _refresh_catalog_for_unknown_model(self, requested_model: Any) -> None:
+        """Refresh the catalog when the requested model is unknown, or when a
+        previously-discovered catalog has gone stale past its TTL. Skips the
+        call entirely for a known model on a never-yet-refreshed catalog, so
+        the static default set continues to work without forcing discovery
+        on every request."""
+        normalized = str(requested_model or "").lower().strip()
+        if "/" in normalized:
+            normalized = normalized.split("/", 1)[1]
+        mapped = MODEL_ALIAS_MAP.get(normalized, normalized)
+        known = mapped in (VALID_CODE_ASSIST_MODELS | self._available_model_ids())
+        stale = bool(
+            self._model_catalog_refreshed_at
+            and time.monotonic() - self._model_catalog_refreshed_at >= self.MODEL_CATALOG_TTL_SECONDS
+        )
+        if not known:
+            await self.list_models(force_refresh=True)
+        elif stale:
+            await self.list_models()
 
     async def create_chat_completion(
         self,
@@ -817,6 +981,7 @@ class AntigravityClient:
         bearer_token: str = "",
     ) -> Dict[str, Any]:
         """Execute a non-streaming chat completion."""
+        await self._refresh_catalog_for_unknown_model(openai_payload.get("model"))
         # Chạy trong thread riêng: hàm này có thể gọi mạng đồng bộ (refresh
         # token, ~20s/tài khoản) — không được chặn event loop của aiohttp.
         candidates = await asyncio.to_thread(
@@ -826,7 +991,13 @@ class AntigravityClient:
         last_response: Optional[httpx.Response] = None
 
         for creds in candidates:
-            envelope = build_code_assist_request(openai_payload, creds.project_id)
+            envelope = build_code_assist_request(
+                openai_payload,
+                creds.project_id,
+                available_models=self._available_model_ids(),
+            )
+            if envelope.get("model") in self._unsupported_models_by_project.get(creds.project_id, set()):
+                continue
             headers = build_antigravity_headers(creds.access_token, creds.project_id)
             url = f"{CODE_ASSIST_BASE_URL}:generateContent"
             resp = await self._http.post(url, json=envelope, headers=headers)
@@ -910,6 +1081,7 @@ class AntigravityClient:
         bearer_token: str = "",
     ) -> AsyncIterator[str]:
         """Stream SSE, failing over before any chunk is emitted."""
+        await self._refresh_catalog_for_unknown_model(openai_payload.get("model"))
         candidates = await asyncio.to_thread(
             self.auth_manager.resolve_credential_candidates,
             bearer_token=bearer_token,
@@ -920,7 +1092,13 @@ class AntigravityClient:
         last_status = 500
 
         for creds in candidates:
-            envelope = build_code_assist_request(openai_payload, creds.project_id)
+            envelope = build_code_assist_request(
+                openai_payload,
+                creds.project_id,
+                available_models=self._available_model_ids(),
+            )
+            if envelope.get("model") in self._unsupported_models_by_project.get(creds.project_id, set()):
+                continue
             headers = build_antigravity_headers(creds.access_token, creds.project_id)
             headers["Accept"] = "text/event-stream"
             stream_id = f"chatcmpl-{uuid.uuid4().hex}"
