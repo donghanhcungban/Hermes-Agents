@@ -128,3 +128,15 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## nextlevelbuilder/ui-ux-pro-max-skill
+Source: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill — MIT,
+Copyright (c) 2024 Next Level Builder.
+
+Hermes integration:
+- `ui-ux-pro-max`
+
+Pinned runtime/search assets are tracked in `skills/ui-ux-pro-max/UPSTREAM.md`.
+The skill composes with Hermes' `claude-design`, `design-md`,
+`popular-web-designs`, `frontend-ui-engineering`, `accessibility-audit`,
+and `redesign-skill` instead of replacing them.
