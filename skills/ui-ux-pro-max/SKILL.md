@@ -81,7 +81,7 @@ Installed skill path:
 
 ```bash
 python "$HERMES_HOME/skills/ui-ux-pro-max/scripts/search.py" \
-  "analytics dashboard dense professional" --design-system -p "Ops Console"
+  "enterprise B2B corporate landing page" --design-system -p "Enterprise Portal"
 ```
 
 Targeted domain:
@@ -95,7 +95,7 @@ Stack implementation:
 
 ```bash
 python "$HERMES_HOME/skills/ui-ux-pro-max/scripts/search.py" \
-  "responsive table overflow" --stack nextjs --json
+  "responsive image fill" --stack nextjs --json
 ```
 
 If `python` is unavailable, try `python3`, then `py -3`.
@@ -110,6 +110,8 @@ After every search:
 1. Verify returned domain/category.
 2. Verify top-result identity and fit.
 3. Check conflict against the project's source of truth.
+   A product category match alone is insufficient: reject a landing-page pattern
+   returned for an application dashboard, or a media rule returned for a table.
 4. If empty/off-topic, retry **once** with a narrower query or explicit domain/stack.
 5. Still bad → stop using database output and label any fallback as general guidance.
 

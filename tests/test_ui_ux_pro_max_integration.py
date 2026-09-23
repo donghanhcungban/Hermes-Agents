@@ -6,6 +6,9 @@ import subprocess
 import sys
 import unittest
 import runpy
+import shutil
+import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +46,21 @@ class UiUxProMaxIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn('"domain": "ux"', proc.stdout)
+
+    def test_installer_copies_runtime_and_license(self) -> None:
+        import install
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package"
+            shutil.copytree(SKILL, package / "skills" / "ui-ux-pro-max")
+            with patch.object(install, "PACKAGE_DIR", package):
+                installed = install.install_bundled_skills(root / "home")
+            self.assertEqual(installed, ["ui-ux-pro-max"])
+            destination = root / "home" / "skills" / "ui-ux-pro-max"
+            self.assertTrue((destination / "scripts" / "search.py").is_file())
+            self.assertTrue((destination / "data" / "ux-guidelines.csv").is_file())
+            self.assertTrue((destination / "LICENSE").is_file())
 
 
 if __name__ == "__main__":
