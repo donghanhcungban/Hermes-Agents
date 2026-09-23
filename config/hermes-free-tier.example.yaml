@@ -1,0 +1,45 @@
+# Cấu hình Hermes "0 Đồng" (100% Zero-Cost Free Tier)
+# Kết hợp các nguồn miễn phí: Google Antigravity OAuth + Groq Cloud Free API + Ollama Local Offline.
+# Không yêu cầu thẻ tín dụng, không mất phí thuê bao hàng tháng.
+
+model:
+  provider: antigravity
+  default: gemini-3.7-flash
+  base_url: http://127.0.0.1:8100/v1
+
+fallback_providers:
+  # 1. Tự động xoay vòng giữa các model Google khi model chính bận/hết hạn mức
+  - provider: antigravity
+    model: gemini-3.7-flash-medium
+  - provider: antigravity
+    model: gemini-3.5-flash
+
+  # 2. Dự phòng đám mây tốc độ cao qua Groq (Miễn phí 100% tại https://console.groq.com)
+  # Yêu cầu thêm GROQ_API_KEY=gsk_... vào file ~/.hermes/.env (Hermes tự nhận diện)
+  - provider: custom
+    model: llama-3.3-70b-versatile
+    base_url: https://api.groq.com/openai/v1
+
+  # 3. Dự phòng chạy cục bộ trên máy tính qua Ollama (Offline 0đ, không phụ thuộc mạng)
+  # Cài đặt: tải Ollama từ https://ollama.com, chạy `ollama pull qwen2.5-coder:7b`
+  - provider: custom
+    model: qwen2.5-coder:7b
+    base_url: http://127.0.0.1:11434/v1
+
+providers:
+  groq:
+    name: Groq Cloud (Free Tier)
+    base_url: https://api.groq.com/openai/v1
+  ollama:
+    name: Ollama Local (Offline 0đ)
+    base_url: http://127.0.0.1:11434/v1
+
+compression:
+  enabled: true
+  threshold: 0.7
+  target_ratio: 0.2
+  protect_last_n: 20
+
+agent:
+  api_max_retries: 3
+  gateway_timeout: 1800

@@ -71,6 +71,66 @@ class SetupCommandTests(unittest.TestCase):
                 ["openai-codex", "anthropic"],
             )
 
+    def test_setup_with_free_tier_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_dir = Path(tmp) / "hermes"
+            hermes_dir.mkdir()
+            import yaml
+
+            config_file = hermes_dir / "config.yaml"
+            args = SimpleNamespace(
+                model="gemini-3.7-flash",
+                port=8100,
+                no_fallback=False,
+                as_fallback_only=False,
+                free_tier=True,
+                groq_model=None,
+                ollama_model=None,
+            )
+
+            with (
+                mock.patch.object(manage, "get_hermes_dir", return_value=hermes_dir),
+                mock.patch.object(manage, "cmd_install", return_value=0),
+                mock.patch.object(manage, "_pool_account_count", return_value=2),
+            ):
+                result = manage.cmd_setup(args)
+
+            data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            self.assertEqual(result, 0)
+            self.assertEqual(data["model"]["provider"], "antigravity")
+            self.assertEqual(len(data["fallback_providers"]), 4)
+            providers = [e["provider"] for e in data["fallback_providers"]]
+            self.assertNotIn("openai-codex", providers)
+            self.assertNotIn("anthropic", providers)
+
+    def test_cmd_setup_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_dir = Path(tmp) / "hermes"
+            hermes_dir.mkdir()
+            import yaml
+
+            config_file = hermes_dir / "config.yaml"
+            args = SimpleNamespace(
+                model="gemini-3.7-flash",
+                port=8100,
+                as_fallback_only=False,
+            )
+
+            with (
+                mock.patch.object(manage, "get_hermes_dir", return_value=hermes_dir),
+                mock.patch.object(manage, "cmd_install", return_value=0),
+                mock.patch.object(manage, "_pool_account_count", return_value=1),
+            ):
+                result = manage.cmd_setup_free(args)
+
+            data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            self.assertEqual(result, 0)
+            self.assertEqual(data["model"]["provider"], "antigravity")
+            self.assertEqual(
+                [e["provider"] for e in data["fallback_providers"]],
+                ["antigravity", "antigravity", "custom", "custom"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

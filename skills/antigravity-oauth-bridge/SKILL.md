@@ -69,14 +69,22 @@ Cơ chế này được thực thi bởi hàm `configure_priority_fallback_prese
 
 Tùy chỉnh khi cài đặt:
 ```bash
-python manage.py setup --no-fallback          # Chỉ dùng antigravity làm chính, không tạo chuỗi dự phòng
-python manage.py setup --as-fallback-only     # Giữ provider chính hiện tại của bạn, chỉ THÊM chuỗi dự phòng antigravity + openai-codex + anthropic
+python manage.py setup-free                       # Cấu hình 100% Zero-Cost Free Tier (Google Antigravity -> Groq Cloud Free -> Ollama Offline)
+python manage.py setup --free-tier                # Tương đương lệnh trên
+python manage.py setup --no-fallback              # Chỉ dùng antigravity làm chính, không tạo chuỗi dự phòng
+python manage.py setup --as-fallback-only         # Giữ provider chính hiện tại của bạn, chỉ THÊM chuỗi dự phòng antigravity + openai-codex + anthropic
 python manage.py setup --groq-model llama-3.3-70b-versatile     # Thêm Groq Cloud sau anthropic (vẫn cần mạng)
-python manage.py setup --ollama-model qwen2.5:7b-instruct        # Thêm Ollama LOCAL làm nấc dự phòng CUỐI CÙNG (offline)
+python manage.py setup --ollama-model qwen2.5-coder:7b          # Thêm Ollama LOCAL làm nấc dự phòng CUỐI CÙNG (offline)
 # Có thể dùng chung: antigravity -> openai-codex -> anthropic -> groq -> ollama
 ```
 
-**Groq Cloud (tùy chọn, KHÔNG bật mặc định):** cũng không phải provider xây sẵn của Hermes — nó ánh xạ theo *host* của `base_url` (`api.groq.com` → biến môi trường `GROQ_API_KEY`, xem `hermes_cli/runtime_provider.py::_host_derived_api_key`), nên chỉ cần điền `GROQ_API_KEY` vào `~/.hermes/.env`, không phải khai gì thêm trong `config.yaml`. `manage.py` gắn nó **sau** `anthropic` — Groq nhanh/rẻ nhưng vẫn là dịch vụ trên mạng, không dùng được khi offline, nên đứng trước Ollama chứ không phải nấc cuối.
+**Chế độ Free Tier "0 Đồng" (`setup-free` / `--free-tier`):** Thiết lập chuỗi dự phòng hoàn toàn miễn phí không đòi hỏi thẻ tín dụng hay tài khoản trả phí:
+1. `antigravity` (`gemini-3.7-flash` chính, xoay vòng tài khoản Google OAuth).
+2. `antigravity` (`gemini-3.7-flash-medium`, `gemini-3.5-flash` dự phòng nội bộ).
+3. `groq` (`llama-3.3-70b-versatile` qua Groq Cloud Free API - đăng ký miễn phí tại `https://console.groq.com`).
+4. `ollama` (`qwen2.5-coder:7b` chạy offline trực tiếp trên máy qua Ollama - hoàn toàn 0đ).
+
+**Groq Cloud (tùy chọn, KHÔNG bật mặc định trong chuỗi trả phí):** cũng không phải provider xây sẵn của Hermes — nó ánh xạ theo *host* của `base_url` (`api.groq.com` → biến môi trường `GROQ_API_KEY`, xem `hermes_cli/runtime_provider.py::_host_derived_api_key`), nên chỉ cần điền `GROQ_API_KEY` vào `~/.hermes/.env`, không phải khai gì thêm trong `config.yaml`. `manage.py` gắn nó **sau** `anthropic` — Groq nhanh/rẻ nhưng vẫn là dịch vụ trên mạng, không dùng được khi offline, nên đứng trước Ollama chứ không phải nấc cuối.
 
 **Ollama local làm nấc dự phòng cuối cùng (tùy chọn, KHÔNG bật mặc định):** Hermes không có provider "ollama" xây sẵn — nó ánh xạ "ollama" sang provider chung `custom` (endpoint OpenAI-compatible tự khai `base_url`), và tự điền `api_key="no-key-required"` cho endpoint local không cần xác thực (xem `hermes_cli/runtime_provider.py` trong mã nguồn Hermes) — không cần biến môi trường nào thêm. `manage.py` gắn nó vào SAU CÙNG, sau cả `groq`: model 7B chạy local **không đủ tin cậy để điều phối** (gọi tool nhiều bước, tuân thủ JSON Schema) so với antigravity/openai-codex/anthropic/groq, nên chỉ nên dùng khi TẤT CẢ nấc trên mạng đều lỗi hoặc máy đang offline hoàn toàn. Yêu cầu `ollama serve` đang chạy và đã `ollama pull <model>` model tương ứng.
 

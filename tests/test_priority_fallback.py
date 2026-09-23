@@ -400,5 +400,91 @@ class GroqCloudFallbackTests(unittest.TestCase):
         self.assertEqual(len(custom_entries), 1)
 
 
+class ZeroCostFreeTierFallbackTests(unittest.TestCase):
+    def test_free_tier_builds_zero_cost_chain(self) -> None:
+        config = {}
+        result = manage.apply_priority_fallback_config(
+            config,
+            antigravity_model="gemini-3.7-flash",
+            antigravity_base_url="http://127.0.0.1:8100/v1",
+            free_tier_only=True,
+        )
+
+        self.assertEqual(result["model"]["provider"], "antigravity")
+        self.assertEqual(result["model"]["default"], "gemini-3.7-flash")
+
+        fallback_chain = result["fallback_providers"]
+        providers = [e["provider"] for e in fallback_chain]
+        self.assertNotIn("openai-codex", providers)
+        self.assertNotIn("anthropic", providers)
+        self.assertNotIn("claude-code-cli", providers)
+
+        self.assertEqual(
+            fallback_chain,
+            [
+                {"provider": "antigravity", "model": "gemini-3.7-flash-medium"},
+                {"provider": "antigravity", "model": "gemini-3.5-flash"},
+                {
+                    "provider": "custom",
+                    "model": "llama-3.3-70b-versatile",
+                    "base_url": manage.DEFAULT_GROQ_BASE_URL,
+                },
+                {
+                    "provider": "custom",
+                    "model": "qwen2.5-coder:7b",
+                    "base_url": manage.DEFAULT_OLLAMA_BASE_URL,
+                },
+            ],
+        )
+
+    def test_free_tier_strips_existing_paid_providers(self) -> None:
+        config = {
+            "fallback_providers": [
+                {"provider": "openai-codex", "model": "gpt-5-codex"},
+                {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                {"provider": "claude-code-cli", "model": "sonnet"},
+            ]
+        }
+        result = manage.apply_priority_fallback_config(
+            config,
+            antigravity_base_url="http://127.0.0.1:8100/v1",
+            free_tier_only=True,
+        )
+
+        providers = [e["provider"] for e in result["fallback_providers"]]
+        self.assertNotIn("openai-codex", providers)
+        self.assertNotIn("anthropic", providers)
+        self.assertNotIn("claude-code-cli", providers)
+
+    def test_free_tier_rerun_does_not_duplicate(self) -> None:
+        config = {}
+        manage.apply_priority_fallback_config(
+            config,
+            antigravity_base_url="http://127.0.0.1:8100/v1",
+            free_tier_only=True,
+        )
+        result = manage.apply_priority_fallback_config(
+            config,
+            antigravity_base_url="http://127.0.0.1:8100/v1",
+            free_tier_only=True,
+        )
+
+        chain = result["fallback_providers"]
+        self.assertEqual(len(chain), 4)
+
+    def test_free_tier_custom_primary_model_filters_self(self) -> None:
+        config = {}
+        result = manage.apply_priority_fallback_config(
+            config,
+            antigravity_model="gemini-3.7-flash-medium",
+            antigravity_base_url="http://127.0.0.1:8100/v1",
+            free_tier_only=True,
+        )
+
+        models = [e.get("model") for e in result["fallback_providers"]]
+        self.assertNotIn("gemini-3.7-flash-medium", models)
+        self.assertIn("gemini-3.5-flash", models)
+
+
 if __name__ == "__main__":
     unittest.main()
