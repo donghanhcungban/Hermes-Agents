@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 CLI_MODEL_ALIASES = {
@@ -25,7 +30,17 @@ CLI_MODEL_ALIASES = {
     "claude-haiku-4-5": "haiku",
 }
 
-Runner = Callable[[list[str], str], Awaitable[tuple[int, str, str]]]
+
+def discover_models_from_help(help_text: str) -> list[str]:
+    """Extract advertised Claude aliases/model IDs from the installed CLI."""
+    defaults = set(CLI_MODEL_ALIASES.values())
+    match = re.search(r"(?ms)^\s*--model <model>.*?(?=^\s{2}--[a-z]|^Commands:|\Z)", help_text)
+    if not match:
+        return sorted(defaults)
+    candidates = re.findall(r"'([a-z0-9][a-z0-9._-]+)'", match.group(0).lower())
+    return sorted(defaults | set(candidates))
+
+Runner = Callable[[list[str], str, dict[str, str]], Awaitable[tuple[int, str, str]]]
 
 
 class ClaudeCodeCliError(RuntimeError):
@@ -36,13 +51,25 @@ class ClaudeCodeCliError(RuntimeError):
         self.status_code = status_code
 
 
-async def _run_cli(command: list[str], prompt: str) -> tuple[int, str, str]:
+async def _run_cli(
+    command: list[str], prompt: str, extra_env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
+    """Run the Claude Code CLI subprocess.
+
+    *extra_env* is merged into the current environment, enabling per-account
+    isolation via the ``CLAUDE_HOME`` env var.
+    """
+    import os as _os
+    env = None
+    if extra_env:
+        env = {**_os.environ, **extra_env}
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise ClaudeCodeCliError(
@@ -147,13 +174,75 @@ def _output_schema() -> dict[str, Any]:
 
 
 class ClaudeCodeCliClient:
-    """Maps an OpenAI chat-completions payload onto `claude -p` safely."""
+    """Maps an OpenAI chat-completions payload onto `claude -p` safely.
 
-    def __init__(self, runner: Runner | None = None, cli_path: str | None = None) -> None:
+    If an AccountPool is registered for the "claude-code" provider, requests
+    are distributed round-robin across accounts via CLAUDE_HOME env isolation.
+    """
+
+    MODEL_CATALOG_TTL_SECONDS = 300.0
+
+    def __init__(
+        self,
+        runner: Runner | None = None,
+        cli_path: str | None = None,
+        use_account_pool: bool = True,
+    ) -> None:
         self._runner = runner or _run_cli
-        self._cli_path = cli_path or os.environ.get("CLAUDE_CODE_CLI_PATH") or "claude"
+        self._cli_path = cli_path or os.environ.get("CLAUDE_CODE_CLI_PATH") or shutil.which("claude") or "claude"
+        self._use_account_pool = use_account_pool
+        self._models = sorted(set(CLI_MODEL_ALIASES.values()))
+        self._models_refreshed_at = 0.0
+        self._models_lock = asyncio.Lock()
+
+    def _get_pool(self):
+        if not self._use_account_pool:
+            return None
+        try:
+            from bridge.account_pool import get_pool
+        except ImportError:
+            try:
+                from tools.antigravity_bridge.account_pool import get_pool
+            except ImportError:
+                return None
+        pool = get_pool("claude-code")
+        return pool if pool.count() > 0 else None
+
+    async def list_models(self, *, force_refresh: bool = False) -> list[str]:
+        """Refresh models advertised by the installed CLI without restarting."""
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._models_refreshed_at
+            and now - self._models_refreshed_at < self.MODEL_CATALOG_TTL_SECONDS
+        ):
+            return list(self._models)
+        async with self._models_lock:
+            now = time.monotonic()
+            if (
+                not force_refresh
+                and self._models_refreshed_at
+                and now - self._models_refreshed_at < self.MODEL_CATALOG_TTL_SECONDS
+            ):
+                return list(self._models)
+            try:
+                returncode, stdout, stderr = await self._runner([self._cli_path, "--help"], "", {})
+                if returncode == 0:
+                    self._models = discover_models_from_help(stdout or stderr)
+            except Exception as exc:  # noqa: BLE001 - discovery is best-effort
+                logger.debug("Claude Code model discovery failed: %s", exc)
+            self._models_refreshed_at = time.monotonic()
+            return list(self._models)
 
     async def create_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run Claude Code CLI for a single turn and return an OpenAI-format response.
+
+        When an AccountPool is active:
+        - Transparently fails over to the next available account if one hits 429
+          (Rate Limit / Usage Quota exceeded).
+        - Automatically tracks rate-limit cooldown per account so exhausted accounts
+          are temporarily bypassed until their limit resets.
+        """
         tools = _tool_specs(payload)
         prompt = _build_prompt(payload.get("messages"), tools)
         requested_model = str(payload.get("model") or "sonnet").lower()
@@ -171,44 +260,120 @@ class ClaudeCodeCliClient:
             "--model",
             model,
         ]
-        try:
-            returncode, stdout, stderr = await self._runner(command, prompt)
-        except FileNotFoundError as exc:
-            raise ClaudeCodeCliError(
-                "Claude Code CLI was not found. Install it, then run `claude auth login`.", 503
-            ) from exc
 
-        if returncode != 0:
-            detail = (stderr or stdout or "Claude Code CLI failed.").strip()
+        pool = self._get_pool()
+        max_attempts = max(1, pool.count()) if pool else 1
+        attempted_ids: set[int] = set()
+
+        for attempt in range(max_attempts):
+            account = pool.pick(exclude_ids=attempted_ids) if pool else None
+            if account:
+                attempted_ids.add(account.id)
+                extra_env: dict[str, str] = pool.env_for(account)
+                account_tag = f"account-{account.id} ({account.name})"
+            else:
+                extra_env = {}
+                account_tag = "default"
+
+            logger.debug("Claude Code CLI attempt %d/%d using %s", attempt + 1, max_attempts, account_tag)
+
             try:
-                cli_error = json.loads(stdout)
-                detail = str(cli_error.get("result") or detail)
-            except (TypeError, json.JSONDecodeError):
-                pass
-            detail_lower = detail.lower()
-            if "not logged in" in detail_lower:
-                raise ClaudeCodeCliError("Claude Code is not logged in. Run `claude auth login`.", 401)
-            status = 429 if "rate limit" in detail_lower else 502
-            raise ClaudeCodeCliError(detail, status)
+                returncode, stdout, stderr = await self._runner(command, prompt, extra_env)
+            except FileNotFoundError as exc:
+                if pool and account:
+                    pool.record_failure(account.id)
+                raise ClaudeCodeCliError(
+                    "Claude Code CLI was not found. Install it, then run `claude auth login`.", 503
+                ) from exc
+
+            if returncode != 0:
+                detail = (stderr or stdout or "Claude Code CLI failed.").strip()
+                try:
+                    cli_error = json.loads(stdout)
+                    detail = str(cli_error.get("result") or detail)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+                detail_lower = detail.lower()
+
+                # Rate limit / usage limit (HTTP 429)
+                is_rate_limit = (
+                    "rate limit" in detail_lower
+                    or "usage limit" in detail_lower
+                    or "message limit" in detail_lower
+                    or "too many requests" in detail_lower
+                    or "429" in detail_lower
+                )
+                if is_rate_limit:
+                    if pool and account:
+                        cooldown, reason = pool.record_rate_limit(account.id, detail)
+                        remaining = [
+                            a for a in pool.list_accounts()
+                            if a.id not in attempted_ids and a.is_available
+                        ]
+                        if remaining:
+                            logger.warning(
+                                "Claude Code account '%s' hit rate limit (%s, cooldown: %.0fs). Retrying with next available account...",
+                                account.name, reason, cooldown,
+                            )
+                            continue
+
+                    nearest = pool.get_nearest_reset_seconds() if pool else None
+                    wait_hint = f" (nearest reset in {nearest}s)" if nearest else ""
+                    raise ClaudeCodeCliError(
+                        f"All Claude Code accounts rate-limited{wait_hint}: {detail}", 429
+                    )
+
+                # Auth error (HTTP 401)
+                if "not logged in" in detail_lower or "auth" in detail_lower:
+                    if pool and account:
+                        pool.record_auth_error(account.id, detail)
+                        remaining = [
+                            a for a in pool.list_accounts()
+                            if a.id not in attempted_ids and a.is_available
+                        ]
+                        if remaining:
+                            logger.warning(
+                                "Claude Code account '%s' auth expired. Retrying with next available account...",
+                                account.name,
+                            )
+                            continue
+                    raise ClaudeCodeCliError("Claude Code is not logged in. Run `claude auth login`.", 401)
+
+                # General error
+                if pool and account:
+                    pool.record_failure(account.id)
+                raise ClaudeCodeCliError(detail, 502)
+
         try:
             output = json.loads(stdout)
             structured = output["structured_output"]
             content = structured["content"]
             tool_calls = structured["tool_calls"]
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            if pool and account:
+                pool.record_failure(account.id)
             raise ClaudeCodeCliError("Claude Code returned an invalid structured response.", 502) from exc
+
         if not isinstance(content, str) or not isinstance(tool_calls, list):
+            if pool and account:
+                pool.record_failure(account.id)
             raise ClaudeCodeCliError("Claude Code returned an invalid structured response.", 502)
 
         allowed_tools = {tool["name"] for tool in tools}
         openai_tool_calls: list[dict[str, Any]] = []
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
+                if pool and account:
+                    pool.record_failure(account.id)
                 raise ClaudeCodeCliError("Claude Code returned an invalid tool call.", 502)
             name, arguments = tool_call.get("name"), tool_call.get("arguments")
             if name not in allowed_tools:
+                if pool and account:
+                    pool.record_failure(account.id)
                 raise ClaudeCodeCliError(f"Claude Code requested tool `{name}` not offered by Hermes.", 502)
             if not isinstance(arguments, dict):
+                if pool and account:
+                    pool.record_failure(account.id)
                 raise ClaudeCodeCliError("Claude Code returned non-object tool arguments.", 502)
             openai_tool_calls.append(
                 {
@@ -217,6 +382,10 @@ class ClaudeCodeCliClient:
                     "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
                 }
             )
+
+        # Record success
+        if pool and account:
+            pool.record_success(account.id)
 
         message: dict[str, Any] = {"role": "assistant", "content": content or None}
         if openai_tool_calls:
@@ -234,3 +403,4 @@ class ClaudeCodeCliClient:
                 }
             ],
         }
+

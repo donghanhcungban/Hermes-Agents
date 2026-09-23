@@ -171,31 +171,49 @@ def cmd_status(args: argparse.Namespace) -> int:
     auth_mgr = AntigravityAuthManager()
     creds = auth_mgr.load_stored_credentials() or auth_mgr.discover_local_tokens()
 
-    print("=" * 55)
-    print("       ANTIGRAVITY OAUTH BRIDGE STATUS REPORT        ")
-    print("=" * 55)
+    print("=" * 60)
+    print("       HERMES MULTI-PROVIDER BRIDGE STATUS REPORT       ")
+    print("=" * 60)
     print(f"  Server Running:  {'YES [ONLINE]' if running else 'NO [OFFLINE]'}")
     print(f"  Listening On:    http://{host}:{port}/v1")
     print(f"  PID File:        {get_pid_file()}")
     print(f"  Log File:        {get_log_file()}")
-    print("-" * 55)
-
+    print("-" * 60)
+    print("  [1] Google Antigravity (OAuth):")
     if creds:
-        print(f"  OAuth Status:    AUTHENTICATED")
-        print(f"  Google Account:  {creds.email or 'Primary User'}")
-        print(f"  Project ID:      {creds.project_id or 'auto-detected'}")
-        print(f"  Token Storage:   {auth_mgr.token_file}")
+        print(f"      Status:      AUTHENTICATED ({creds.email or 'Primary User'})")
+        print(f"      Project ID:  {creds.project_id or 'auto-detected'}")
         if creds.expires_at:
             exp_str = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(creds.expires_at))
             status_text = "EXPIRED (Will auto-refresh)" if creds.is_expired else "VALID"
-            print(f"  Token Expiry:    {exp_str} [{status_text}]")
-        print(f"  Refresh Token:   {'AVAILABLE' if creds.refresh_token else 'NOT FOUND'}")
+            print(f"      Token Expiry:{exp_str} [{status_text}]")
     else:
-        print(f"  OAuth Status:    NOT LOGGED IN")
-        print(f"  Action needed:   Run 'python manage.py login'")
+        print(f"      Status:      NOT LOGGED IN (Run 'python manage.py login')")
 
-    print("=" * 55)
-    return 0 if running and creds else 1
+    print("-" * 60)
+    print("  [2] Claude Code CLI (Subscription):")
+    claude_bin = shutil.which("claude")
+    print(f"      CLI Binary:  {'INSTALLED' if claude_bin else 'NOT FOUND'}")
+    try:
+        from bridge.account_pool import get_pool
+        claude_pool = get_pool("claude-code")
+        print(f"      Accounts:    {claude_pool.count()} total, {claude_pool.active_count()} active")
+    except Exception:
+        pass
+
+    print("-" * 60)
+    print("  [3] OpenAI Codex CLI (Subscription):")
+    codex_bin = shutil.which("codex")
+    print(f"      CLI Binary:  {'INSTALLED' if codex_bin else 'NOT FOUND'}")
+    try:
+        from bridge.account_pool import get_pool
+        codex_pool = get_pool("codex")
+        print(f"      Accounts:    {codex_pool.count()} total, {codex_pool.active_count()} active")
+    except Exception:
+        pass
+
+    print("=" * 60)
+    return 0 if running else 1
 
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -331,6 +349,136 @@ def cmd_setup_claude_code(args: argparse.Namespace) -> int:
     else:
         print("[*] Run `claude auth login` once to authenticate your Claude subscription before chatting.")
     return 0
+
+
+DEFAULT_CODEX_CLI_MODEL = "gpt-6-astra"
+
+
+def configure_codex_cli(
+    hermes_dir: Path,
+    *,
+    model: str = DEFAULT_CODEX_CLI_MODEL,
+    port: int = DEFAULT_BRIDGE_PORT,
+) -> Path:
+    """Select the local OpenAI Codex CLI subscription bridge as Hermes' primary model."""
+    import yaml
+
+    config_file = hermes_dir / "config.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config: dict = {}
+    if config_file.exists():
+        config = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+    config["model"] = {
+        "provider": "codex-cli",
+        "default": model,
+        "base_url": f"http://127.0.0.1:{port}/v1/codex",
+    }
+    existing = config.get("fallback_providers")
+    if isinstance(existing, list):
+        config["fallback_providers"] = [
+            item for item in existing
+            if not (isinstance(item, dict) and item.get("provider") == "codex-cli")
+        ]
+    with open(config_file, "w", encoding="utf-8") as handle:
+        yaml.dump(config, handle, default_flow_style=False)
+    return config_file
+
+
+def cmd_setup_codex(args: argparse.Namespace) -> int:
+    """Configure Hermes to call the authenticated local OpenAI Codex CLI."""
+    hermes_dir = get_hermes_dir()
+    cmd_install(args)
+    env_file = hermes_dir / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_content = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+    if "CODEX_CLI_KEY=" not in env_content:
+        with open(env_file, "a", encoding="utf-8") as handle:
+            handle.write(
+                "\n# Local OpenAI Codex subscription bridge (not an OpenAI API key)\nCODEX_CLI_KEY=local-codex-bridge\n"
+            )
+    model = getattr(args, "model", None) or DEFAULT_CODEX_CLI_MODEL
+    port = getattr(args, "port", None) or DEFAULT_BRIDGE_PORT
+    configure_codex_cli(hermes_dir, model=model, port=port)
+    print(f"[+] Hermes now uses Codex CLI ({model}) at http://127.0.0.1:{port}/v1/codex")
+    if not shutil.which("codex"):
+        print("[!] Codex CLI was not found. Install it with `npm install -g @openai/codex`, then run `codex login`.")
+    else:
+        print("[*] Ensure you have run `codex login` once before chatting.")
+    return 0
+
+
+def cmd_accounts(args: argparse.Namespace) -> int:
+    """List all accounts in the pool for a provider, with status and rate limit countdown."""
+    provider = getattr(args, "provider", "codex")
+    try:
+        from bridge.account_pool import get_pool
+    except ImportError:
+        from tools.antigravity_bridge.account_pool import get_pool
+
+    pool = get_pool(provider)
+    status = pool.status_dict()
+    accounts = status.get("accounts", [])
+    print(
+        f"\nAccount Pool: {provider.upper()} "
+        f"(Total: {status['total_accounts']}, Active: {status['active_accounts']}, "
+        f"Rate-Limited: {status.get('rate_limited_accounts', 0)})"
+    )
+    if not accounts:
+        print(f"  No accounts registered yet. Run `python manage.py add-account {provider}` to add one.")
+        return 0
+
+    print("-" * 92)
+    print(f"{'ID':<4} {'Name':<14} {'Status':<36} {'Reqs':<6} {'Fails':<6} {'Notes'}")
+    print("-" * 92)
+    for a in accounts:
+        print(
+            f"{a['id']:<4} {a['name']:<14} {a['status']:<36} "
+            f"{a['total_requests']:<6} {a['total_failures']:<6} {a.get('notes', '')}"
+        )
+    print("-" * 92)
+    if status.get("nearest_reset_seconds"):
+        print(f"[*] Nearest rate-limit reset in {status['nearest_reset_seconds']}s")
+    return 0
+
+
+def cmd_add_account(args: argparse.Namespace) -> int:
+    """Add a new account slot to the pool and show login instructions."""
+    provider = getattr(args, "provider", "codex")
+    name = getattr(args, "name", None)
+    notes = getattr(args, "notes", "")
+    try:
+        from bridge.account_pool import get_pool
+    except ImportError:
+        from tools.antigravity_bridge.account_pool import get_pool
+
+    pool = get_pool(provider)
+    account = pool.add_account(name=name, notes=notes)
+    print(f"\n[+] Created account slot #{account.id}: '{account.name}'")
+    print(f"    Config Dir: {account.config_dir}")
+    print("\nTo authenticate this account, run in your terminal:")
+    print("-" * 65)
+    print(pool.login_instructions(account).strip())
+    print("-" * 65)
+    return 0
+
+
+def cmd_reset_limit(args: argparse.Namespace) -> int:
+    """Clear rate limit cooldown for a specific account."""
+    provider = getattr(args, "provider", "codex")
+    account_id = getattr(args, "account_id", 1)
+    try:
+        from bridge.account_pool import get_pool
+    except ImportError:
+        from tools.antigravity_bridge.account_pool import get_pool
+
+    pool = get_pool(provider)
+    ok = pool.clear_rate_limit(account_id)
+    if ok:
+        print(f"[+] Cleared rate limit for {provider} account #{account_id}.")
+    else:
+        print(f"[-] Account #{account_id} not found in {provider} pool.")
+    return 0
+
 
 
 def apply_priority_fallback_config(
@@ -754,6 +902,30 @@ def main() -> int:
         f"(default: {DEFAULT_OLLAMA_BASE_URL}). Only used when --ollama-model is set.",
     )
 
+    p_setup_codex = subparsers.add_parser(
+        "setup-codex", help="Configure Hermes to use the local OpenAI Codex CLI bridge"
+    )
+    p_setup_codex.add_argument("--model", type=str, default=DEFAULT_CODEX_CLI_MODEL)
+    p_setup_codex.add_argument("--port", type=int, default=DEFAULT_BRIDGE_PORT)
+
+    p_accounts = subparsers.add_parser(
+        "accounts", help="List accounts in the pool with status and rate-limit countdown"
+    )
+    p_accounts.add_argument("provider", choices=["codex", "claude-code"], default="codex", nargs="?")
+
+    p_add_account = subparsers.add_parser(
+        "add-account", help="Add a new subscription account to the rotation pool"
+    )
+    p_add_account.add_argument("provider", choices=["codex", "claude-code"], default="codex", nargs="?")
+    p_add_account.add_argument("--name", type=str, default=None, help="Optional name for the account")
+    p_add_account.add_argument("--notes", type=str, default="", help="Optional notes")
+
+    p_reset_limit = subparsers.add_parser(
+        "reset-limit", help="Clear rate limit cooldown for an account"
+    )
+    p_reset_limit.add_argument("provider", choices=["codex", "claude-code"], default="codex", nargs="?")
+    p_reset_limit.add_argument("account_id", type=int, default=1, nargs="?")
+
     args = parser.parse_args()
 
     handlers = {
@@ -764,6 +936,10 @@ def main() -> int:
         "install": cmd_install,
         "setup": cmd_setup,
         "setup-claude-code": cmd_setup_claude_code,
+        "setup-codex": cmd_setup_codex,
+        "accounts": cmd_accounts,
+        "add-account": cmd_add_account,
+        "reset-limit": cmd_reset_limit,
     }
     return handlers[args.action](args)
 
