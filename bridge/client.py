@@ -119,7 +119,6 @@ MODEL_ALIAS_MAP = {
     # Gemini 3.8 Flash — real code_assist_model ID not yet confirmed; temp route via 3.6-flash-medium
     "gemini-3.8-flash": "gemini-3.6-flash-medium",
     "gemini-3.8-flash-low": "gemini-3.6-flash-medium",
-    "gemini-3.8-flash-tiered": "gemini-3.6-flash-medium",
     # Gemini 3.6 Flash
     "gemini-3.6-flash": "gemini-3.6-flash-medium",
     "gemini-3.6-flash-medium": "gemini-3.6-flash-medium",
