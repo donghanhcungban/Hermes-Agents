@@ -101,3 +101,27 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - `$HERMES_HOME/.env`
 - access token, refresh token, cookie, API key thật
 - log bridge có thể chứa email hoặc metadata tài khoản
+
+## UI/UX Pro Max trong Hermes
+
+`ui-ux-pro-max` là lớp design-intelligence/router cho các task UI/UX. Nó cung cấp
+catalog tìm kiếm + design-system reasoning, rồi chuyển phần việc sang skill chuyên
+trách:
+
+- `claude-design`: process/taste và artifact/prototype;
+- `design-md`: design token spec bền vững;
+- `popular-web-designs`: visual vocabulary của brand/site quen thuộc;
+- `frontend-ui-engineering`: production implementation;
+- `accessibility-audit`: hậu kiểm accessibility;
+- `redesign-skill`: nâng cấp codebase UI hiện có.
+
+Runtime và catalog đã được đóng gói sẵn. Kiểm tra rồi cài đặt:
+
+```bash
+python -m unittest discover -s tests -p "test_ui_ux_pro_max_integration.py" -v
+python install.py
+```
+
+Installer tự copy đệ quy toàn bộ skill vào `$HERMES_HOME/skills/ui-ux-pro-max/`.
+Script `sync_upstream.py` chỉ dành cho maintainer khi cập nhật upstream đã pin;
+người dùng không cần truy cập mạng để cài đặt hoặc sử dụng skill.

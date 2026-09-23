@@ -38,6 +38,7 @@ tests/                     Bộ test suite (unittest, không cần kết nối m
 skills/antigravity-oauth-bridge/   Skill vận hành plugin và rotation OAuth
 skills/hermes-provider-management/ Skill quản lý provider/fallback/compression
 skills/project-harness-engineering/ Skill thiết kế và audit project harness
+skills/ui-ux-pro-max/          Searchable UI/UX intelligence + Hermes design routing
 config/hermes-rotation.example.yaml Cấu hình mẫu đã loại bí mật
 docs/CURRENT_SETUP_VI.md            Tổng hợp cấu hình vận hành hiện tại
 install.py                           Script cài plugin + bridge + skill vào $HERMES_HOME
