@@ -1,0 +1,86 @@
+name: Hermes Native Compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native-registration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: d0288be5b3330d2442e3907185b8e9d0958297bb
+          path: .audit-hermes
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install pinned Hermes core and schema validator
+        run: python -m pip install -e .audit-hermes 'jsonschema>=4,<5'
+      - name: Register and invoke tools through real Hermes APIs without model credentials
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, sys, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          sys.path.insert(0, str(root / '.audit-hermes'))
+          with tempfile.TemporaryDirectory() as directory:
+              home = Path(directory) / 'profile'
+              workspace = Path(directory) / 'workspace'
+              home.mkdir()
+              workspace.mkdir()
+              os.environ['HERMES_HOME'] = str(home)
+              os.environ['HERMES_WORKBENCH_ROOT'] = str(workspace)
+              from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+              from tools.registry import registry
+              from jsonschema import Draft202012Validator
+              plugin_dir = root / 'plugins' / 'engineering-workbench'
+              spec = importlib.util.spec_from_file_location('workbench_native_smoke', plugin_dir / '__init__.py', submodule_search_locations=[str(plugin_dir)])
+              plugin = importlib.util.module_from_spec(spec)
+              sys.modules[spec.name] = plugin
+              spec.loader.exec_module(plugin)
+              manager = PluginManager()
+              manifest = PluginManifest(name='engineering-workbench', path=str(plugin_dir), source='user')
+              context = PluginContext(manifest, manager)
+              plugin.register(context)
+              assert manager.list_plugin_skills('engineering-workbench') == ['mep', 'office', 'software']
+              cases = {
+                  'engineering_status': {},
+                  'engineering_plan': {'domain': 'software', 'objective': 'Synthetic smoke test'},
+                  'engineering_repo_inspect': {},
+                  'engineering_mep_calculate': {'operation': 'three_phase_current', 'inputs': {'power_W': 10000, 'line_voltage_V': 400, 'power_factor': 0.8}, 'design_basis': 'Synthetic smoke test, not construction'},
+                  'engineering_boq': {'currency': 'VND', 'items': [{'id': '1', 'description': 'Fixture', 'unit': 'm', 'quantity': '0.1', 'unit_price': '0.2', 'source': 'synthetic'}]},
+                  'engineering_export': {'format': 'md', 'title': 'Synthetic', 'sections': [{'heading': 'Test', 'body': 'No private data.'}], 'sources': ['synthetic']},
+              }
+              results = {}
+              for name, args in cases.items():
+                  entry = registry.get_entry(name, scope=manager.scope_key)
+                  assert entry is not None, name
+                  Draft202012Validator.check_schema(entry.schema['parameters'])
+                  Draft202012Validator(entry.schema['parameters']).validate(args)
+                  result = json.loads(entry.handler(args, task_id='native-smoke'))
+                  assert result['ok'], (name, result)
+                  results[name] = 'passed'
+              assert len(results) == 6
+              manager.unload()
+              report = {'scope': 'real Hermes PluginContext, tool registry, skill registration and six handler calls', 'upstream_sha': 'd0288be5b3330d2442e3907185b8e9d0958297bb', 'python': sys.version, 'results': results, 'model_calls': 0, 'user_host_tested': False, 'full_session_or_gateway_tested': False}
+              Path('native-smoke.json').write_text(json.dumps(report, indent=2) + '\n')
+              print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hermes-native-smoke
+          path: native-smoke.json
+          if-no-files-found: warn
+          retention-days: 7
