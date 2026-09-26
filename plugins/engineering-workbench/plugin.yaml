@@ -1,0 +1,10 @@
+name: engineering-workbench
+version: 0.1.0
+description: Evidence-first software, office and preliminary MEP tools for Hermes Agent
+provides_tools:
+  - engineering_status
+  - engineering_plan
+  - engineering_repo_inspect
+  - engineering_mep_calculate
+  - engineering_boq
+  - engineering_export

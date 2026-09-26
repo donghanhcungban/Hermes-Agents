@@ -1,0 +1,6 @@
+# Optional exporters. Install explicitly in the Python environment running Hermes.
+# Version ranges are not a lockfile; pin the tested environment before production.
+python-docx>=1.1,<2
+openpyxl>=3.1,<4
+python-pptx>=1.0,<2
+reportlab>=4,<5
