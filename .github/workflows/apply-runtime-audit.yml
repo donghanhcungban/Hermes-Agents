@@ -1,0 +1,96 @@
+# One-shot transfer of a locally tested, SHA-256-bound patch onto PR #23 only.
+# Removed after successful transfer. Does not write main, use repository secrets,
+# install onto a user host, merge PRs, or accept arbitrary patch destinations.
+name: Apply Verified Audit Patch
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths: ['.audit-transfer/**', '.github/workflows/apply-runtime-audit.yml']
+permissions: {}
+concurrency:
+  group: apply-hermes-audit-23
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: >-
+      github.repository == 'donghanhcungban/Hermes-Agents' &&
+      github.event.pull_request.number == 23 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'fix/hermes-runtime-hardening-20260926' &&
+      github.event.pull_request.user.login == 'seeker19110'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify exact patch and target file baseline before applying
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          expected = {'.gitignore', 'README.md', 'bridge/account_pool.py', 'bridge/claude_code.py', 'bridge/codex.py', 'bridge/http_security.py', 'bridge/protocol.py', 'bridge/server.py', 'docs/RUNTIME_AUDIT_20260926_VI.md', 'install_workbench.py', 'manage.py', 'plugin/__init__.py', 'plugins/engineering-workbench/artifacts.py', 'plugins/engineering-workbench/core.py', 'plugins/engineering-workbench/plugin.yaml', 'tests/test_runtime_hardening.py', 'tests/test_workbench_delivery.py'}
+          raw = b''.join(Path(f'.audit-transfer/patch-{i}.xz.b64').read_bytes() for i in (1, 2))
+          assert len(raw) == 32618
+          assert hashlib.sha256(raw).hexdigest() == '61ed45f0d9c1f8e536fd1a3fba8b80e5c6e8a08178d7edd2f92a68decdb5bbda'
+          decoded = base64.b64decode(b''.join(raw.split()), validate=True)
+          decompressor = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
+          patch = decompressor.decompress(decoded, max_length=100000)
+          assert decompressor.eof and not decompressor.unused_data and len(patch) == 98657
+          assert hashlib.sha256(patch).hexdigest() == '9d2a1e58cb5957325a005858f79275736f8af4f01df99ae82ad676222a01621f'
+          temp = Path(os.environ['RUNNER_TEMP']) / 'verified-runtime.patch'
+          temp.write_bytes(patch)
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(temp)], text=True)
+          paths = {line.split('\t', 2)[2] for line in stats.splitlines()}
+          assert paths == expected, paths
+          subprocess.run(['git', 'diff', '--quiet', '9ece164b39dbf262c6e5c34424fbe949e50c03db', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'apply', '--check', str(temp)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(temp)], check=True)
+          changed = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          assert changed == expected, changed
+          print(stats)
+          Path(os.environ['RUNNER_TEMP'], 'expected-files.json').write_text(json.dumps(sorted(expected)))
+          PY
+      - name: Install test dependencies with no push credentials in environment
+        run: python -m pip install -r requirements-dev.txt -r requirements-office.txt 'pytest>=8,<10' 'jsonschema>=4,<5'
+      - name: Run full regression suite before publishing
+        run: |
+          python -m pytest tests -q --junitxml="$RUNNER_TEMP/applied-audit-tests.xml"
+          python -m compileall -q bridge plugin plugins/engineering-workbench manage.py install_workbench.py
+          git diff --cached --check
+          git diff --exit-code
+      - name: Commit verified changes and fast-forward only the authorized PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, subprocess
+          from pathlib import Path
+          expected = set(json.loads(Path(os.environ['RUNNER_TEMP'], 'expected-files.json').read_text()))
+          changed = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          assert changed == expected
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: harden CLI account loops, HTTP boundary and workbench delivery'], check=True)
+          # Credential is only supplied to git push; no credential is persisted in the checkout.
+          authorization = base64.b64encode(('x-access-token:' + os.environ['GH_TOKEN']).encode()).decode()
+          env = dict(os.environ, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader', GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + authorization)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/fix/hermes-runtime-hardening-20260926'], env=env, check=True)
+          report = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'patch_sha256': '9d2a1e58cb5957325a005858f79275736f8af4f01df99ae82ad676222a01621f', 'files': sorted(expected), 'main_modified': False}
+          Path(os.environ['RUNNER_TEMP'], 'applied-audit.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: applied-audit-evidence
+          path: |
+            ${{ runner.temp }}/applied-audit-tests.xml
+            ${{ runner.temp }}/applied-audit.json
+          retention-days: 7
+          if-no-files-found: warn
