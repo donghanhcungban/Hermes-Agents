@@ -9,7 +9,7 @@ import os
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 DOMAINS = {
     "software": {
         "steps": ["Inspect repository and instructions", "Reproduce and add regression test", "Implement on an isolated branch/worktree", "Run tests, lint, build and security checks", "Review diff independently", "Open PR with evidence; do not infer merge/deploy"],
@@ -34,6 +34,10 @@ def text(value, name, limit=2000):
         raise ValueError(f"{name}: expected non-empty text up to {limit} characters")
     if any(ord(c) < 32 and c not in "\n\r\t" for c in value):
         raise ValueError(f"{name}: control characters are not allowed")
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise ValueError(f"{name}: invalid Unicode") from None
     return value.strip()
 
 
@@ -78,11 +82,17 @@ def inside(relative="."):
 
 
 def capabilities(args):
+    try:
+        workspace()
+        workspace_valid = True
+    except (ValueError, OSError):
+        workspace_valid = False
     return {
         "version": VERSION,
         "implemented": ["workflow planning (not execution)", "static repository inventory", "five SI preliminary calculations", "BOQ arithmetic", "office artifact export"],
         "optional_libraries": {m: importlib.util.find_spec(m) is not None for m in ("docx", "openpyxl", "pptx", "reportlab")},
-        "workspace_configured": bool(os.environ.get("HERMES_WORKBENCH_ROOT")),
+        "workspace_configured": workspace_valid,
+        "workspace_declared": bool(os.environ.get("HERMES_WORKBENCH_ROOT")),
         "not_implemented": ["Revit/AutoCAD live adapter", "IFC clash detection", "email/calendar adapters", "autonomous merge/deploy", "regulatory compliance certification"],
         "host_connections": "not probed; an installed library is not a live integration",
     }

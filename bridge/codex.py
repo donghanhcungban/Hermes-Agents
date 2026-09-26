@@ -13,6 +13,8 @@ Codex is reduced to a pure language model endpoint.
 
 from __future__ import annotations
 
+from .protocol import normalize_tool_calls, strict_json
+
 import asyncio
 import json
 import logging
@@ -145,6 +147,14 @@ async def _run_cli(
         process.kill()
         await process.wait()
         raise CodexCliError("Codex CLI timed out after 300 seconds.", 504) from exc
+
+    except asyncio.CancelledError:
+        # Cancellation is not a provider failure and must not leave a billing process alive.
+        import contextlib
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
 
     return process.returncode or 0, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
@@ -414,6 +424,10 @@ class CodexCliClient:
 
         for attempt in range(max_attempts):
             account = pool.pick(exclude_ids=attempted_ids) if pool else None
+            if pool and pool.count() and account is None:
+                nearest = pool.get_nearest_reset_seconds()
+                status = 429 if nearest else 503
+                raise CodexCliError("No configured account is available; global credentials were not used.", status)
             if account:
                 attempted_ids.add(account.id)
                 extra_env: dict[str, str] = pool.env_for(account)
@@ -502,7 +516,7 @@ class CodexCliClient:
                 # Check for authentication failure (HTTP 401)
                 if "not logged in" in detail_lower or "auth" in detail_lower or "401" in detail_lower:
                     if pool and account:
-                        pool.record_auth_error(account.id, detail)
+                        pool.record_auth_error(account.id, "CLI authentication failed; sign in locally to this account")
                         remaining = [
                             a for a in pool.list_accounts()
                             if a.id not in attempted_ids and a.is_available
@@ -529,46 +543,26 @@ class CodexCliClient:
                     pool.record_failure(account.id)
                 raise
 
-        # The raw_text should be the JSON-encoded structured output
-        content = ""
-        openai_tool_calls: list[dict[str, Any]] = []
+            break  # First successful result is final; do not consume other accounts.
 
-        if raw_text:
-            try:
-                structured = json.loads(raw_text)
-                content = structured.get("content") or ""
-                raw_tool_calls = structured.get("tool_calls") or []
-            except json.JSONDecodeError:
-                # If Codex didn't wrap in JSON, treat as plain text answer
-                content = raw_text
-                raw_tool_calls = []
-
-            allowed_tools = {tool["name"] for tool in tools}
-            for tc in raw_tool_calls:
-                if not isinstance(tc, dict):
-                    continue
-                name = tc.get("name")
-                if not name:
-                    continue
-                if allowed_tools and name not in allowed_tools:
-                    if pool and account:
-                        pool.record_failure(account.id)
-                    raise CodexCliError(
-                        f"Codex requested tool `{name}` not offered by Hermes.", 502
-                    )
-                # arguments may be a JSON string or a dict
-                args = tc.get("arguments", {})
-                if isinstance(args, dict):
-                    args_str = json.dumps(args, ensure_ascii=False)
-                else:
-                    args_str = str(args)
-                openai_tool_calls.append(
-                    {
-                        "id": f"call_{uuid.uuid4().hex}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": args_str},
-                    }
-                )
+        # --output-schema promised structured JSON. Never turn malformed/empty output into success.
+        try:
+            structured = strict_json(raw_text)
+            if not isinstance(structured, dict) or not isinstance(structured.get("content"), str):
+                raise ValueError("Codex returned invalid structured content")
+            content = structured["content"]
+            validated_calls = normalize_tool_calls(
+                structured.get("tool_calls"), tools, payload.get("tool_choice"), string_arguments=True
+            )
+        except (ValueError, TypeError, RecursionError) as exc:
+            if pool and account:
+                pool.record_failure(account.id)
+            raise CodexCliError(str(exc), 502) from None
+        openai_tool_calls = [
+            {"id": f"call_{uuid.uuid4().hex}", "type": "function", "function": {
+                "name": tc["name"], "arguments": json.dumps(tc["arguments"], ensure_ascii=False, allow_nan=False)
+            }} for tc in validated_calls
+        ]
 
         # Record success for the chosen account
         if pool and account:

@@ -19,7 +19,7 @@ def install(home: Path, apply=False, upgrade=False):
     for item in (home, *home.parents, home / "plugins", destination):
         if item.is_symlink():
             raise ValueError("Symlink install paths are not supported")
-    if not SOURCE.is_dir() or any(p.is_symlink() for p in SOURCE.rglob("*")):
+    if SOURCE.is_symlink() or not SOURCE.is_dir() or any(p.is_symlink() for p in SOURCE.rglob("*")):
         raise ValueError("Plugin source is missing or contains symlinks")
     if destination.exists() and not upgrade:
         raise ValueError("Plugin already exists; review it and use --upgrade to back up and replace")
@@ -28,7 +28,7 @@ def install(home: Path, apply=False, upgrade=False):
     if not apply:
         return result
     destination.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".workbench-stage-", dir=destination.parent))
+    stage = Path(tempfile.mkdtemp(prefix=".workbench-stage-", dir=home))
     backup = None
     try:
         shutil.copytree(SOURCE, stage / "plugin", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
