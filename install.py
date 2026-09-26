@@ -39,39 +39,70 @@ def _get_skill_name(skill_file: Path) -> str | None:
 
 
 def install_bundled_skills(hermes_dir: Path) -> list[str]:
-    """Đồng bộ skill đóng gói, loại bỏ duplicate theo tên skill ở thư mục con, không chạm vào skill khác của người dùng."""
+    """Install flat skills; back up replaced copies and never follow symlinks.
+
+    Backups live outside Hermes' skill scan. The transaction is per skill, not
+    the entire installer. Run only in a trusted, single-user installation root.
+    """
+    import tempfile
+    import uuid
+
     source_root = PACKAGE_DIR / "skills"
-    destination_root = hermes_dir / "skills"
     if not source_root.is_dir():
         return []
-
-    installed: list[str] = []
-    for source_skill in sorted(source_root.iterdir()):
-        source_md = source_skill / "SKILL.md"
-        if not source_skill.is_dir() or not source_md.is_file():
-            continue
-        destination_root.mkdir(parents=True, exist_ok=True)
-        destination_skill = (destination_root / source_skill.name).resolve()
-        source_name = _get_skill_name(source_md) or source_skill.name
-
-        # Dọn dẹp bản sao trùng tên (dựa trên YAML name) nằm ở các thư mục con
-        for existing_file in list(destination_root.rglob("SKILL.md")):
-            parent = existing_file.parent
-            if parent.resolve() != destination_skill:
-                existing_name = _get_skill_name(existing_file)
-                if existing_name == source_name:
-                    if parent.is_dir():
-                        shutil.rmtree(parent)
-
-        if destination_skill.is_symlink():
-            destination_skill.unlink()
-        elif destination_skill.is_dir():
-            shutil.rmtree(destination_skill)
-        elif destination_skill.exists():
-            destination_skill.unlink()
-
-        shutil.copytree(source_skill, destination_skill)
-        installed.append(source_skill.name)
+    home = Path(hermes_dir).expanduser().absolute()
+    destination_root = home / "skills"
+    backup_root = home / "skill-backups"
+    for item in (home, *home.parents, destination_root, backup_root, source_root):
+        if item.is_symlink():
+            raise ValueError(f"Refusing symlink skill installation path: {item}")
+    sources = [p for p in sorted(source_root.iterdir()) if p.is_dir() and (p / "SKILL.md").is_file()]
+    for source in sources:
+        if source.is_symlink() or any(p.is_symlink() for p in source.rglob("*")):
+            raise ValueError(f"Refusing symlink in bundled skill: {source.name}")
+        if (destination_root / source.name).is_symlink():
+            raise ValueError(f"Refusing symlink skill destination: {source.name}")
+    home.mkdir(parents=True, exist_ok=True)
+    destination_root.mkdir(exist_ok=True)
+    installed = []
+    for source in sources:
+        destination = destination_root / source.name  # Deliberately NOT resolve().
+        name = _get_skill_name(source / "SKILL.md") or source.name
+        replacements = [destination] if destination.exists() else []
+        # os.walk explicitly does not traverse links to external skill trees.
+        for directory, subdirs, filenames in os.walk(destination_root, followlinks=False):
+            parent = Path(directory)
+            subdirs[:] = [d for d in subdirs if not (parent / d).is_symlink()]
+            existing = parent / "SKILL.md"
+            if (parent != destination_root and parent != destination
+                    and "SKILL.md" in filenames and not existing.is_symlink()
+                    and _get_skill_name(existing) == name):
+                replacements.append(parent)
+        # If a parent will be backed up, do not separately move its children.
+        selected = []
+        for item in sorted(set(replacements), key=lambda p: len(p.parts)):
+            if not any(item.is_relative_to(parent) for parent in selected):
+                selected.append(item)
+        moved = []
+        with tempfile.TemporaryDirectory(prefix=".skill-stage-", dir=home) as temp:
+            staged = Path(temp) / "skill"
+            shutil.copytree(source, staged, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            try:
+                if selected:
+                    backup = backup_root / uuid.uuid4().hex
+                    backup.mkdir(parents=True, mode=0o700)
+                    for old in selected:
+                        target = backup / old.relative_to(destination_root)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        old.rename(target)
+                        moved.append((old, target))
+                staged.rename(destination)
+            except Exception:
+                for old, target in reversed(moved):
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    target.rename(old)
+                raise
+        installed.append(source.name)
     return installed
 
 
