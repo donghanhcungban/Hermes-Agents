@@ -2,3 +2,15 @@
 *.pyc
 *.pyo
 .env
+
+# Local credentials, generated artifacts and isolated audit checkout
+.env
+.env.local
+.hermes/.env
+/auth/
+/accounts/
+/logs/
+/artifacts/
+.audit-hermes/
+audit-evidence/
+native-smoke.json

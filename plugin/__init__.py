@@ -11,6 +11,7 @@ All three route through the shared bridge on port 8100.
 from __future__ import annotations
 
 import sys
+import logging
 from typing import Any
 
 from providers import register_provider
@@ -31,9 +32,10 @@ class AntigravityProfile(ProviderProfile):
             if bridge_root.is_dir() and str(bridge_root) not in sys.path:
                 sys.path.insert(0, str(bridge_root))
             from tools.antigravity_bridge.server import ensure_antigravity_bridge_running
-            ensure_antigravity_bridge_running()
-        except Exception:
-            pass
+            if not ensure_antigravity_bridge_running():
+                logging.getLogger(__name__).warning("Antigravity bridge is not ready; check local login and bridge status")
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
         reasoning_config = context.get("reasoning_config")
         if not reasoning_config:
             return {}
@@ -51,9 +53,10 @@ class ClaudeCodeCliProfile(ProviderProfile):
             if bridge_root.is_dir() and str(bridge_root) not in sys.path:
                 sys.path.insert(0, str(bridge_root))
             from tools.antigravity_bridge.server import ensure_claude_code_bridge_running
-            ensure_claude_code_bridge_running()
-        except Exception:
-            pass
+            if not ensure_claude_code_bridge_running():
+                logging.getLogger(__name__).warning("Claude bridge is not ready; check local bridge status")
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
         return {}
 
 
@@ -72,9 +75,10 @@ class CodexCliProfile(ProviderProfile):
             if bridge_root.is_dir() and str(bridge_root) not in sys.path:
                 sys.path.insert(0, str(bridge_root))
             from tools.antigravity_bridge.server import ensure_codex_bridge_running
-            ensure_codex_bridge_running()
-        except Exception:
-            pass
+            if not ensure_codex_bridge_running():
+                logging.getLogger(__name__).warning("Codex bridge is not ready; check local bridge status")
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
         return {}
 
 
@@ -84,7 +88,7 @@ antigravity = AntigravityProfile(
     display_name="Google Antigravity (OAuth)",
     description="Google Gemini & Claude models via Antigravity OAuth local bridge",
     signup_url="https://antigravity.google",
-    env_vars=("ANTIGRAVITY_API_KEY",),
+    env_vars=("HERMES_BRIDGE_API_KEY", "ANTIGRAVITY_API_KEY"),
     base_url="http://127.0.0.1:8100/v1",
     auth_type="api_key",
     fallback_models=(
@@ -109,9 +113,9 @@ claude_code_cli = ClaudeCodeCliProfile(
     aliases=("claude-code", "claude-subscription"),
     display_name="Claude Code (Subscription CLI)",
     description="Local Claude Code CLI bridge using an authenticated Claude subscription. "
-                "Supports multiple accounts via CLAUDE_HOME isolation.",
+                "Supports multiple accounts via CLAUDE_CONFIG_DIR (verify identity; macOS uses Keychain).",
     signup_url="https://claude.ai",
-    env_vars=("CLAUDE_CODE_CLI_KEY",),
+    env_vars=("HERMES_BRIDGE_API_KEY", "CLAUDE_CODE_CLI_KEY"),
     base_url="http://127.0.0.1:8100/v1/claude-code",
     auth_type="api_key",
     fallback_models=("fable", "opus", "sonnet", "haiku"),
@@ -128,7 +132,7 @@ codex_cli = CodexCliProfile(
     description="OpenAI Codex CLI bridge using a ChatGPT Plus/Team subscription. "
                 "Supports multiple accounts via CODEX_HOME isolation.",
     signup_url="https://chatgpt.com",
-    env_vars=("CODEX_CLI_KEY",),
+    env_vars=("HERMES_BRIDGE_API_KEY", "CODEX_CLI_KEY"),
     base_url="http://127.0.0.1:8100/v1/codex",
     auth_type="api_key",
     fallback_models=("gpt-6-astra", "o3-mini", "o3", "gpt-4o"),

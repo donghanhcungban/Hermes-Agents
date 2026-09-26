@@ -40,6 +40,7 @@ try:
         get_log_file,
         get_pid_file,
         is_server_running,
+        bridge_launch_command,
     )
 except ImportError:
     from tools.antigravity_bridge.auth import AntigravityAuthManager, get_hermes_dir
@@ -49,12 +50,18 @@ except ImportError:
         get_log_file,
         get_pid_file,
         is_server_running,
+        bridge_launch_command,
     )
 
 
 def cmd_start(args: argparse.Namespace) -> int:
     port = args.port or DEFAULT_BRIDGE_PORT
     host = args.host or DEFAULT_BRIDGE_HOST
+    try:
+        cmd, package_root = bridge_launch_command(host, port)
+    except ValueError as exc:
+        print(f"[-] {exc}")
+        return 2
     pid_file = get_pid_file()
     log_file = get_log_file()
 
@@ -75,19 +82,6 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     log_fd = open(log_file, "a", encoding="utf-8")
 
-    installed_layout = (PLUGIN_ROOT / "tools" / "antigravity_bridge" / "server.py").is_file()
-    server_import = (
-        "from tools.antigravity_bridge.server import run_server"
-        if installed_layout
-        else "from bridge.server import run_server"
-    )
-    cmd = [
-        sys.executable,
-        "-u",
-        "-c",
-        f"import sys; sys.path.insert(0, r'{PLUGIN_ROOT}'); sys.path.insert(0, r'{REPO_ROOT}'); {server_import}; run_server(host='{host}', port={port})",
-    ]
-
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -98,7 +92,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=str(PLUGIN_ROOT),
+            cwd=str(package_root),
             stdout=log_fd,
             stderr=log_fd,
             stdin=subprocess.DEVNULL,
@@ -113,7 +107,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         flags = 0x00000008 | 0x00000200
         proc = subprocess.Popen(
             cmd,
-            cwd=str(PLUGIN_ROOT),
+            cwd=str(package_root),
             stdout=log_fd,
             stderr=log_fd,
             stdin=subprocess.DEVNULL,
@@ -121,11 +115,17 @@ def cmd_start(args: argparse.Namespace) -> int:
             env=env,
         )
 
+    log_fd.close()  # The child owns its duplicated log handles.
+
     with open(pid_file, "w", encoding="utf-8") as f:
         f.write(str(proc.pid))
 
     deadline = time.time() + 10.0
     while time.time() < deadline:
+        if proc.poll() is not None:
+            pid_file.unlink(missing_ok=True)
+            print("[-] Bridge exited before becoming healthy. Check logs at:", log_file)
+            return 1
         if is_server_running(host, port):
             print(f"[+] Antigravity Bridge started successfully (PID: {proc.pid})")
             print(f"    Endpoint: http://{host}:{port}/v1")

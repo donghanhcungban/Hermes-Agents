@@ -6,7 +6,7 @@ Accounts are stored under:
 
 Account isolation is achieved via environment variables:
   - Codex CLI:       CODEX_HOME={account_dir}
-  - Claude Code CLI: CLAUDE_HOME={account_dir}
+  - Claude Code CLI: CLAUDE_CONFIG_DIR={account_dir}
 
 Features:
   1. Round-robin rotation across active accounts
@@ -32,6 +32,8 @@ import os
 import re
 import threading
 import time
+import tempfile
+from .protocol import strict_json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ENV_VAR = {
     "codex": "CODEX_HOME",
-    "claude-code": "CLAUDE_HOME",
+    "claude-code": "CLAUDE_CONFIG_DIR",
 }
 
 # Max consecutive non-429 failures before an account is suspended
@@ -237,6 +239,8 @@ class AccountPool:
     """Round-robin pool of subscription CLI accounts with smart rate-limit management."""
 
     def __init__(self, provider: str, hermes_dir: Optional[Path] = None) -> None:
+        if provider not in PROVIDER_ENV_VAR:
+            raise ValueError("Unsupported account provider")
         self.provider = provider
         self._lock = threading.RLock()
         self._rr_index = 0
@@ -267,36 +271,66 @@ class AccountPool:
     # ------------------------------------------------------------------
 
     def _load(self) -> None:
-        if not self._registry_path.is_file():
+        if not self._registry_path.exists():
             return
+        if self._registry_path.is_symlink() or not self._registry_path.is_file():
+            raise ValueError("Account registry must be a regular file")
         try:
-            data = json.loads(self._registry_path.read_text(encoding="utf-8"))
-            self._accounts = [_entry_from_dict(e) for e in data.get("accounts", [])]
-        except Exception as exc:
-            logger.warning("Failed to load account pool registry %s: %s", self._registry_path, exc)
+            with self._registry_path.open("rb") as handle:
+                raw = handle.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise ValueError("Registry too large")
+            data = strict_json(raw.decode("utf-8"))
+            if not isinstance(data, dict) or data.get("provider", self.provider) != self.provider:
+                raise ValueError("Wrong provider registry")
+            entries = data.get("accounts")
+            if not isinstance(entries, list):
+                raise ValueError("Invalid account list")
+            accounts = []
+            seen = set()
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ValueError("Invalid account entry")
+                account = _entry_from_dict(entry)
+                if (type(account.id) is not int or account.id <= 0 or account.id in seen
+                        or not isinstance(account.name, str) or not account.name
+                        or not isinstance(account.config_dir, str) or not Path(account.config_dir).is_absolute()
+                        or type(account.enabled) is not bool or type(account.auth_valid) is not bool):
+                    raise ValueError("Invalid account fields")
+                for key in ("suspended_until", "rate_limited_until", "added_at", "total_requests", "total_failures", "consecutive_failures", "rate_limit_count"):
+                    value = getattr(account, key)
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                        raise ValueError("Invalid account counters")
+                seen.add(account.id)
+                accounts.append(account)
+            self._accounts = accounts
+        except (ValueError, KeyError, TypeError, UnicodeError, RecursionError) as exc:
+            # A corrupt configured pool must not become an empty pool using global credentials.
+            raise ValueError("Invalid account registry; restore a verified backup before retrying") from exc
 
     def _save(self) -> None:
+        """Atomic replacement, unique private temporary file, and truthful persistence failure.
+
+        Single-writer registry: this does not provide multi-process transaction isolation.
+        """
+        payload = {"provider": self.provider, "updated_at": time.time(),
+                   "accounts": [asdict(a) for a in self._accounts]}
+        content = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False)
+        fd, temporary = tempfile.mkstemp(prefix=".registry-", suffix=".tmp", dir=self._registry_path.parent)
         try:
-            payload = {
-                "provider": self.provider,
-                "updated_at": time.time(),
-                "accounts": [asdict(a) for a in self._accounts],
-            }
-            content = json.dumps(payload, indent=2, ensure_ascii=False)
-            tmp = self._registry_path.with_suffix(".tmp")
-            tmp.write_text(content, encoding="utf-8")
-            try:
-                os.replace(tmp, self._registry_path)
-            except OSError:
-                time.sleep(0.01)
-                try:
-                    os.replace(tmp, self._registry_path)
-                except OSError:
-                    self._registry_path.write_text(content, encoding="utf-8")
-                    with contextlib.suppress(OSError):
-                        tmp.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.error("Failed to save account pool registry: %s", exc)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._registry_path)
+        except Exception:
+            # Restore the last committed in-memory state too; never claim a failed write succeeded.
+            self._accounts = []
+            self._load()
+            raise
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
 
     # ------------------------------------------------------------------
     # Account management
@@ -584,13 +618,13 @@ class AccountPool:
                 return (
                     f'# Authenticate Claude Code account "{account.name}" (PowerShell)\n'
                     f'$env:{env_var} = "{config_dir}"\n'
-                    f'claude login\n'
+                    f'claude auth login\n'
                     f'# Once login completes, Hermes can use this account.\n'
                 )
             return (
                 f'# Authenticate Claude Code account "{account.name}" (bash/zsh)\n'
                 f'export {env_var}="{config_dir}"\n'
-                f'claude login\n'
+                f'claude auth login\n'
                 f'# Once login completes, Hermes can use this account.\n'
             )
         return f"Set {env_var}={config_dir} then log in."
@@ -600,13 +634,16 @@ class AccountPool:
 # Singleton per-provider pools (lazy, process-lifetime)
 # ---------------------------------------------------------------------------
 
-_pools: dict[str, AccountPool] = {}
+_pools: dict[tuple[str, str], AccountPool] = {}
 _pools_lock = threading.Lock()
 
 
 def get_pool(provider: str) -> AccountPool:
-    """Return (or create) the singleton AccountPool for *provider*."""
+    """Return a pool scoped to provider AND resolved Hermes profile, never another user's home."""
+    from .auth import get_hermes_dir
+    home = get_hermes_dir().expanduser().resolve()
+    key = (provider, os.path.normcase(str(home)))
     with _pools_lock:
-        if provider not in _pools:
-            _pools[provider] = AccountPool(provider)
-        return _pools[provider]
+        if key not in _pools:
+            _pools[key] = AccountPool(provider, hermes_dir=home)
+        return _pools[key]

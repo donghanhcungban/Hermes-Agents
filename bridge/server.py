@@ -31,6 +31,8 @@ from typing import Any, Dict, Optional
 
 from aiohttp import web
 
+from .http_security import BridgeBoundary, MAX_BODY, public_error, read_payload, require_loopback
+
 try:
     from bridge.auth import (
         AntigravityAuthManager,
@@ -108,14 +110,19 @@ class AntigravityBridgeServer:
         port: int = DEFAULT_BRIDGE_PORT,
         auth_manager: Optional[AntigravityAuthManager] = None,
     ) -> None:
+        self.boundary = BridgeBoundary(host)
         self.host = host
         self.port = port
         self.auth_manager = auth_manager or AntigravityAuthManager()
         self.client = AntigravityClient(self.auth_manager)
         self.claude_code_client = ClaudeCodeCliClient()
         self.codex_client = CodexCliClient() if CodexCliClient is not None else None
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[self.boundary.middleware], client_max_size=MAX_BODY)
+        self.app.on_cleanup.append(self._close_clients)
         self._setup_routes()
+
+    async def _close_clients(self, app) -> None:
+        await self.client.close()
 
     def _setup_routes(self) -> None:
         self.app.router.add_get("/health", self.handle_health)
@@ -159,6 +166,8 @@ class AntigravityBridgeServer:
                 "codex": ["/v1/codex/models", "/v1/codex/chat/completions"],
             },
             "timestamp": time.time(),
+            "inference_auth": "api_key" if self.boundary.api_key else "loopback_only",
+            "http_admin_enabled": bool(self.boundary.admin_token),
         })
 
     async def handle_auth_status(self, request: web.Request) -> web.Response:
@@ -191,7 +200,7 @@ class AntigravityBridgeServer:
                 "project_id": creds.project_id,
             })
         except Exception as e:
-            return web.json_response({"ok": False, "error": str(e)}, status=500)
+            return web.json_response({"ok": False, "error": public_error(e)}, status=500)
 
     async def handle_list_models(self, request: web.Request) -> web.Response:
         """Unified model catalog: merges Antigravity + Claude Code + Codex models.
@@ -222,7 +231,7 @@ class AntigravityBridgeServer:
                         "provider": "antigravity",
                     })
             except Exception as exc:
-                logger.warning("Antigravity model discovery failed: %s", exc)
+                logger.warning("Antigravity model discovery failed: %s", type(exc).__name__)
 
         # --- Claude Code CLI ---
         if not provider_filter or provider_filter in {"claude-code", "claude", "claude-code-cli"}:
@@ -240,7 +249,7 @@ class AntigravityBridgeServer:
                         "provider": "claude-code-cli",
                     })
             except Exception as exc:
-                logger.warning("Claude Code model discovery failed: %s", exc)
+                logger.warning("Claude Code model discovery failed: %s", type(exc).__name__)
 
         # --- Codex CLI ---
         if not provider_filter or provider_filter in {"codex", "codex-cli", "openai", "openai-codex"}:
@@ -259,7 +268,7 @@ class AntigravityBridgeServer:
                             "provider": "codex-cli",
                         })
                 except Exception as exc:
-                    logger.warning("Codex model discovery failed: %s", exc)
+                    logger.warning("Codex model discovery failed: %s", type(exc).__name__)
 
         return web.json_response({"object": "list", "data": models})
 
@@ -272,7 +281,7 @@ class AntigravityBridgeServer:
         try:
             catalog = await self.client.list_models(force_refresh=force_refresh)
         except Exception as exc:
-            logger.error("Antigravity model catalog error: %s", exc)
+            logger.error("Antigravity model catalog error: %s", type(exc).__name__)
             return web.json_response({"object": "list", "data": []})
         ts = int(time.time())
         return web.json_response({
@@ -319,7 +328,7 @@ class AntigravityBridgeServer:
 
     async def handle_chat_completions(self, request: web.Request) -> web.StreamResponse:
         try:
-            payload = await request.json()
+            payload = await read_payload(request)
         except Exception as e:
             return web.json_response(
                 {"error": {"message": f"Invalid JSON payload: {e}", "type": "invalid_request_error"}},
@@ -349,7 +358,7 @@ class AntigravityBridgeServer:
     ) -> web.StreamResponse:
         if _payload is None:
             try:
-                _payload = await request.json()
+                _payload = await read_payload(request)
             except Exception as e:
                 return web.json_response(
                     {"error": {"message": f"Invalid JSON payload: {e}", "type": "invalid_request_error"}},
@@ -364,6 +373,8 @@ class AntigravityBridgeServer:
             if bearer_token in {"dummy", "none", "token", "default", "antigravity"}:
                 bearer_token = ""
 
+        if self.boundary.api_key:
+            bearer_token = ""
         is_stream = bool(payload.get("stream"))
 
         if is_stream:
@@ -371,11 +382,13 @@ class AntigravityBridgeServer:
             try:
                 first_chunk = await stream_gen.__anext__()
             except Exception as e:
-                logger.error("Error connecting to chat completion stream: %s", e)
+                with contextlib.suppress(Exception):
+                    await stream_gen.aclose()
+                logger.error("Error connecting to chat completion stream: %s", type(e).__name__)
                 status_code = _upstream_status(e)
                 err_type = "rate_limit_error" if status_code == 429 else "api_error"
                 return web.json_response(
-                    {"error": {"message": str(e), "type": err_type, "code": status_code}},
+                    {"error": {"message": public_error(e), "type": err_type, "code": status_code}},
                     status=status_code,
                 )
 
@@ -395,7 +408,9 @@ class AntigravityBridgeServer:
                     async for chunk_str in stream_gen:
                         await response.write(chunk_str.encode("utf-8"))
                 except Exception as e:
-                    logger.error("Error during chat completion stream: %s", e)
+                    logger.error("Error during chat completion stream: %s", type(e).__name__)
+                    event = {"error": {"message": public_error(e), "type": "api_error"}}
+                    await response.write(("data: " + json.dumps(event) + "\n\n").encode("utf-8"))
                 await response.write_eof()
             except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
                 logger.debug("Client disconnected during streaming: %s", e)
@@ -403,7 +418,7 @@ class AntigravityBridgeServer:
                 if "closing transport" in str(e).lower() or "connection" in str(e).lower():
                     logger.debug("Client connection lost during streaming: %s", e)
                 else:
-                    logger.error("Unexpected error during streaming: %s", e)
+                    logger.error("Unexpected error during streaming: %s", type(e).__name__)
             finally:
                 with contextlib.suppress(Exception):
                     await stream_gen.aclose()
@@ -413,11 +428,11 @@ class AntigravityBridgeServer:
                 result = await self.client.create_chat_completion(payload, bearer_token=bearer_token)
                 return web.json_response(result)
             except Exception as e:
-                logger.error("Error during chat completion: %s", e)
+                logger.error("Error during chat completion: %s", type(e).__name__)
                 status_code = _upstream_status(e)
                 err_type = "rate_limit_error" if status_code == 429 else "api_error"
                 return web.json_response(
-                    {"error": {"message": str(e), "type": err_type, "code": status_code}},
+                    {"error": {"message": public_error(e), "type": err_type, "code": status_code}},
                     status=status_code,
                 )
 
@@ -447,7 +462,7 @@ class AntigravityBridgeServer:
     ) -> web.StreamResponse:
         if _payload is None:
             try:
-                _payload = await request.json()
+                _payload = await read_payload(request)
             except Exception as exc:
                 return web.json_response(
                     {"error": {"message": f"Invalid JSON payload: {exc}", "type": "invalid_request_error"}},
@@ -456,11 +471,11 @@ class AntigravityBridgeServer:
         try:
             result = await self.claude_code_client.create_chat_completion(_payload)
         except Exception as exc:
-            logger.error("Claude Code CLI completion failed: %s", exc)
+            logger.error("Claude Code CLI completion failed: %s", type(exc).__name__)
             status_code = _upstream_status(exc)
             err_type = "rate_limit_error" if status_code == 429 else "api_error"
             return web.json_response(
-                {"error": {"message": str(exc), "type": err_type, "code": status_code}},
+                {"error": {"message": public_error(exc), "type": err_type, "code": status_code}},
                 status=status_code,
             )
         if not _payload.get("stream"):
@@ -523,7 +538,7 @@ class AntigravityBridgeServer:
             )
         if _payload is None:
             try:
-                _payload = await request.json()
+                _payload = await read_payload(request)
             except Exception as exc:
                 return web.json_response(
                     {"error": {"message": f"Invalid JSON payload: {exc}", "type": "invalid_request_error"}},
@@ -532,11 +547,11 @@ class AntigravityBridgeServer:
         try:
             result = await self.codex_client.create_chat_completion(_payload)
         except Exception as exc:
-            logger.error("Codex CLI completion failed: %s", exc)
+            logger.error("Codex CLI completion failed: %s", type(exc).__name__)
             status_code = _upstream_status(exc)
             err_type = "rate_limit_error" if status_code == 429 else "api_error"
             return web.json_response(
-                {"error": {"message": str(exc), "type": err_type, "code": status_code}},
+                {"error": {"message": public_error(exc), "type": err_type, "code": status_code}},
                 status=status_code,
             )
         if not _payload.get("stream"):
@@ -587,21 +602,24 @@ class AntigravityBridgeServer:
     async def handle_list_accounts(self, request: web.Request) -> web.Response:
         provider = request.match_info["provider"]
         pool, err = self._get_pool_or_error(provider)
-        if err:
+        if err is not None:
             return err
         return web.json_response(pool.status_dict())
 
     async def handle_add_account(self, request: web.Request) -> web.Response:
         provider = request.match_info["provider"]
         pool, err = self._get_pool_or_error(provider)
-        if err:
+        if err is not None:
             return err
         try:
-            body = await request.json()
+            body = await read_payload(request)
         except Exception:
-            body = {}
+            return web.json_response({"error": "Invalid JSON object"}, status=400)
+        if (not isinstance(body, dict) or set(body) - {"name", "notes"}
+                or any(not isinstance(v, str) or len(v) > 2000 for v in body.values())):
+            return web.json_response({"error": "Invalid account fields"}, status=400)
         name = body.get("name") or None
-        notes = str(body.get("notes") or "")
+        notes = body.get("notes", "")
         account = pool.add_account(name=name, notes=notes)
         instructions = pool.login_instructions(account)
         return web.json_response({
@@ -618,7 +636,7 @@ class AntigravityBridgeServer:
     async def handle_remove_account(self, request: web.Request) -> web.Response:
         provider = request.match_info["provider"]
         pool, err = self._get_pool_or_error(provider)
-        if err:
+        if err is not None:
             return err
         try:
             account_id = int(request.match_info["account_id"])
@@ -632,16 +650,16 @@ class AntigravityBridgeServer:
     async def handle_update_account(self, request: web.Request) -> web.Response:
         provider = request.match_info["provider"]
         pool, err = self._get_pool_or_error(provider)
-        if err:
+        if err is not None:
             return err
         try:
             account_id = int(request.match_info["account_id"])
         except ValueError:
             return web.json_response({"error": "account_id must be an integer."}, status=400)
         try:
-            body = await request.json()
+            body = await read_payload(request)
         except Exception:
-            body = {}
+            return web.json_response({"error": "Invalid JSON object"}, status=400)
         if body.get("enabled") is True:
             ok = pool.enable_account(account_id)
             if not ok:
@@ -653,7 +671,7 @@ class AntigravityBridgeServer:
         """Manually clear rate-limit cooldown for an account."""
         provider = request.match_info["provider"]
         pool, err = self._get_pool_or_error(provider)
-        if err:
+        if err is not None:
             return err
         try:
             account_id = int(request.match_info["account_id"])
@@ -668,7 +686,11 @@ class AntigravityBridgeServer:
         runner = web.AppRunner(self.app)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
-        await site.start()
+        try:
+            await site.start()
+        except BaseException:
+            await runner.cleanup()
+            raise
         logger.info("Hermes Multi-Provider Bridge listening on http://%s:%s", self.host, self.port)
         return runner
 
@@ -679,16 +701,37 @@ def run_server(host: str = DEFAULT_BRIDGE_HOST, port: int = DEFAULT_BRIDGE_PORT)
     web.run_app(server.app, host=host, port=port)
 
 
+def bridge_launch_command(host=DEFAULT_BRIDGE_HOST, port=DEFAULT_BRIDGE_PORT):
+    """Return argv/cwd for either supported layout; never interpolate user paths into Python."""
+    require_loopback(host)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("Bridge port must be an integer in 1..65535")
+    source = Path(__file__).resolve()
+    if source.parent.name == "bridge":
+        module, root = "bridge.server", source.parents[1]
+    else:
+        module, root = "tools.antigravity_bridge.server", source.parents[2]
+    code = f"import sys; from {module} import run_server; run_server(host=sys.argv[1], port=int(sys.argv[2]))"
+    return [sys.executable, "-u", "-c", code, host, str(port)], root
+
+
 def is_server_running(host: str = DEFAULT_BRIDGE_HOST, port: int = DEFAULT_BRIDGE_PORT) -> bool:
-    """Check if the bridge server is responding to health checks."""
+    """Bounded direct-loopback health check, without proxies or redirects."""
     import urllib.request
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
     try:
-        req = urllib.request.Request(f"http://{host}:{port}/health")
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            # Accept both legacy "antigravity" and new "hermes-multi-provider"
-            bridge = data.get("bridge", "")
-            return bridge in {"antigravity", "hermes-multi-provider"}
+        bridge_launch_command(host, port)  # Validate before constructing the URL.
+        authority = f"[{host}]" if ":" in host else host
+        req = urllib.request.Request(f"http://{authority}:{port}/health")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open(req, timeout=1.0) as resp:
+            raw = resp.read(16385)
+        if len(raw) > 16384:
+            return False
+        data = json.loads(raw.decode("utf-8"))
+        return isinstance(data, dict) and data.get("status") == "ok" and data.get("bridge") in {"antigravity", "hermes-multi-provider"}
     except Exception:
         return False
 
@@ -701,6 +744,7 @@ def _ensure_bridge_running(
     require_antigravity_credentials: bool,
 ) -> bool:
     """Ensure the shared bridge server is running, spawning a daemon if not."""
+    cmd, package_root = bridge_launch_command(host, port)
     if is_server_running(host=host, port=port):
         return True
 
@@ -710,20 +754,12 @@ def _ensure_bridge_running(
 
     if require_antigravity_credentials:
         try:
-            from tools.antigravity_bridge.auth import AntigravityAuthManager
             mgr = AntigravityAuthManager()
             if not mgr.load_all_stored_credentials():
                 return False
         except Exception:
             return False
 
-    cmd = [
-        sys.executable,
-        "-u",
-        "-c",
-        f"from tools.antigravity_bridge.server import run_server; run_server(host='{host}', port={port})",
-    ]
-    package_root = Path(__file__).resolve().parents[2]
 
     try:
         if sys.platform == "win32":
@@ -731,6 +767,7 @@ def _ensure_bridge_running(
                 cmd,
                 cwd=str(package_root),
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
@@ -740,6 +777,7 @@ def _ensure_bridge_running(
                 cmd,
                 cwd=str(package_root),
                 start_new_session=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
@@ -752,7 +790,7 @@ def _ensure_bridge_running(
                 return True
         return is_server_running(host=host, port=port)
     except Exception as e:
-        logger.warning("Failed to auto-spawn Hermes Bridge: %s", e)
+        logger.warning("Failed to auto-spawn Hermes Bridge: %s", type(e).__name__)
         return False
 
 

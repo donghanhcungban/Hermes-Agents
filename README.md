@@ -58,3 +58,14 @@ python tests/verify_integration.py
 
 ## 📄 Giấy phép (License)
 Phát triển cho cộng đồng Hermes Agent & Antigravity. Bản quyền thuộc về giấy phép MIT — xem file [LICENSE](LICENSE).
+
+## Engineering Workbench — software, văn phòng và MEP
+
+Native plugin `engineering-workbench` chạy trên Hermes, với sáu tool và ba skill
+chuyên môn. Xem [thiết kế và cài đặt](docs/ENGINEERING_WORKBENCH_VI.md),
+[**audit runtime 26/09/2026 + migration 0.1.1**](docs/RUNTIME_AUDIT_20260926_VI.md).
+CI có kiểm tra registry/PluginContext thật của Hermes đã pin trên Python 3.14,
+không thay thế kiểm thử phiên chat, tài khoản provider hay máy CAD của người dùng.
+HTTP admin của bridge mặc định tắt; inference chỉ dùng loopback, hỗ trợ API key
+riêng. Đọc migration trước khi nâng cấp runtime đang cài. Workbench tạo bản nháp;
+MEP không phải hồ sơ đã được duyệt để thi công.

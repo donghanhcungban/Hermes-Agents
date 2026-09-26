@@ -6,6 +6,8 @@ only process that may execute a requested Hermes tool call.
 
 from __future__ import annotations
 
+from .protocol import normalize_tool_calls, strict_json
+
 import asyncio
 import json
 import logging
@@ -57,12 +59,18 @@ async def _run_cli(
     """Run the Claude Code CLI subprocess.
 
     *extra_env* is merged into the current environment, enabling per-account
-    isolation via the ``CLAUDE_HOME`` env var.
+    isolation via the ``CLAUDE_CONFIG_DIR`` env var.
     """
     import os as _os
-    env = None
-    if extra_env:
-        env = {**_os.environ, **extra_env}
+    # This provider is subscription-only. Do not inherit Hermes' paid fallback API
+    # key/gateway settings into claude -p; never mutate the parent environment.
+    env = {**_os.environ, **(extra_env or {})}
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_AWS_API_KEY",
+                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+        env.pop(key, None)
+    if extra_env and extra_env.get("CLAUDE_CONFIG_DIR"):
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)  # A selected account must not use an ambient token.
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -82,6 +90,14 @@ async def _run_cli(
         process.kill()
         await process.wait()
         raise ClaudeCodeCliError("Claude Code CLI timed out after 300 seconds.", 504) from exc
+    except asyncio.CancelledError:
+        # Cancellation is not a provider failure and must not leave a billing process alive.
+        import contextlib
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
+
     return process.returncode or 0, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
 
@@ -177,7 +193,7 @@ class ClaudeCodeCliClient:
     """Maps an OpenAI chat-completions payload onto `claude -p` safely.
 
     If an AccountPool is registered for the "claude-code" provider, requests
-    are distributed round-robin across accounts via CLAUDE_HOME env isolation.
+    are distributed round-robin across accounts via CLAUDE_CONFIG_DIR env isolation.
     """
 
     MODEL_CATALOG_TTL_SECONDS = 300.0
@@ -246,12 +262,19 @@ class ClaudeCodeCliClient:
         tools = _tool_specs(payload)
         prompt = _build_prompt(payload.get("messages"), tools)
         requested_model = str(payload.get("model") or "sonnet").lower()
+        for prefix in ("claude-code-cli/", "claude-code/"):
+            if requested_model.startswith(prefix):
+                requested_model = requested_model[len(prefix):]
+                break
         model = CLI_MODEL_ALIASES.get(requested_model, requested_model)
         command = [
             self._cli_path,
             "-p",
             "--tools",
             "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",  # --tools "" alone does not disable MCP tools.
             "--no-session-persistence",
             "--output-format",
             "json",
@@ -267,6 +290,10 @@ class ClaudeCodeCliClient:
 
         for attempt in range(max_attempts):
             account = pool.pick(exclude_ids=attempted_ids) if pool else None
+            if pool and pool.count() and account is None:
+                nearest = pool.get_nearest_reset_seconds()
+                status = 429 if nearest else 503
+                raise ClaudeCodeCliError("No configured account is available; global credentials were not used.", status)
             if account:
                 attempted_ids.add(account.id)
                 extra_env: dict[str, str] = pool.env_for(account)
@@ -326,7 +353,7 @@ class ClaudeCodeCliClient:
                 # Auth error (HTTP 401)
                 if "not logged in" in detail_lower or "auth" in detail_lower:
                     if pool and account:
-                        pool.record_auth_error(account.id, detail)
+                        pool.record_auth_error(account.id, "CLI authentication failed; sign in locally to this account")
                         remaining = [
                             a for a in pool.list_accounts()
                             if a.id not in attempted_ids and a.is_available
@@ -344,12 +371,14 @@ class ClaudeCodeCliClient:
                     pool.record_failure(account.id)
                 raise ClaudeCodeCliError(detail, 502)
 
+            break  # Success: do not call a second account or consume another request.
+
         try:
-            output = json.loads(stdout)
+            output = strict_json(stdout)
             structured = output["structured_output"]
             content = structured["content"]
             tool_calls = structured["tool_calls"]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        except (KeyError, ValueError, TypeError, RecursionError) as exc:
             if pool and account:
                 pool.record_failure(account.id)
             raise ClaudeCodeCliError("Claude Code returned an invalid structured response.", 502) from exc
@@ -359,22 +388,15 @@ class ClaudeCodeCliClient:
                 pool.record_failure(account.id)
             raise ClaudeCodeCliError("Claude Code returned an invalid structured response.", 502)
 
-        allowed_tools = {tool["name"] for tool in tools}
+        try:
+            validated_calls = normalize_tool_calls(tool_calls, tools, payload.get("tool_choice"))
+        except (ValueError, TypeError, RecursionError) as exc:
+            if pool and account:
+                pool.record_failure(account.id)
+            raise ClaudeCodeCliError(str(exc), 502) from None
         openai_tool_calls: list[dict[str, Any]] = []
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                if pool and account:
-                    pool.record_failure(account.id)
-                raise ClaudeCodeCliError("Claude Code returned an invalid tool call.", 502)
-            name, arguments = tool_call.get("name"), tool_call.get("arguments")
-            if name not in allowed_tools:
-                if pool and account:
-                    pool.record_failure(account.id)
-                raise ClaudeCodeCliError(f"Claude Code requested tool `{name}` not offered by Hermes.", 502)
-            if not isinstance(arguments, dict):
-                if pool and account:
-                    pool.record_failure(account.id)
-                raise ClaudeCodeCliError("Claude Code returned non-object tool arguments.", 502)
+        for tool_call in validated_calls:
+            name, arguments = tool_call["name"], tool_call["arguments"]
             openai_tool_calls.append(
                 {
                     "id": f"call_{uuid.uuid4().hex}",

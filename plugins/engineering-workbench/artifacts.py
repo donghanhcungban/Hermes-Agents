@@ -143,6 +143,15 @@ def write_file(path, data):
                     cell.data_type = "s"
         meta.column_dimensions["A"].width = 24
         meta.column_dimensions["B"].width = 90
+        if sections:
+            narrative = book.create_sheet("Narrative")
+            for section in sections:
+                narrative.append([section["heading"], section["body"]])
+                for cell in narrative[narrative.max_row]:
+                    cell.data_type = "s"
+                    cell.alignment = styles.Alignment(vertical="top", wrap_text=True)
+            narrative.column_dimensions["A"].width = 24
+            narrative.column_dimensions["B"].width = 90
         book.save(path)
     elif kind == "pptx":
         pptx = dependency("pptx")
@@ -201,7 +210,12 @@ def export(args):
     path = directory / ("draft." + data["format"])
     try:
         write_file(path, data)
-        evidence = {"version": VERSION, "status": "draft_generated", "file": path.name,
+        supplemental = []
+        if data["format"] == "csv" and data["sections"]:
+            narrative = directory / "narrative.json"
+            narrative.write_text(json.dumps({"title": data["title"], "sections": data["sections"], "status": DRAFT}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            supplemental.append({"file": narrative.name, "path": str(narrative), "sha256": hashlib.sha256(narrative.read_bytes()).hexdigest()})
+        evidence = {"version": VERSION, "supplemental_files": supplemental, "status": "draft_generated", "file": path.name,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "input_sha256": digest(data),
                     "sources": data["sources"], "sources_verified": False, "visual_review": "not_performed",
                     "warning": DRAFT}
