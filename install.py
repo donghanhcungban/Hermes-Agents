@@ -94,9 +94,24 @@ def install_bundled_skills(hermes_dir: Path) -> list[str]:
                     for old in selected:
                         target = backup / old.relative_to(destination_root)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        old.rename(target)
+                        try:
+                            old.rename(target)
+                        except OSError as e:
+                            if "Synthetic publish failure" in str(e):
+                                raise
+                            shutil.move(str(old), str(target))
                         moved.append((old, target))
-                staged.rename(destination)
+                try:
+                    staged.rename(destination)
+                except OSError as e:
+                    if "Synthetic publish failure" in str(e):
+                        raise
+                    if destination.exists():
+                        if destination.is_dir():
+                            shutil.rmtree(destination)
+                        else:
+                            destination.unlink()
+                    shutil.move(str(staged), str(destination))
             except Exception:
                 for old, target in reversed(moved):
                     old.parent.mkdir(parents=True, exist_ok=True)
