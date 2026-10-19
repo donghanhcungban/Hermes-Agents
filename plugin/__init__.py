@@ -10,12 +10,29 @@ All three route through the shared bridge on port 8100.
 
 from __future__ import annotations
 
-import sys
 import logging
 from typing import Any
 
 from providers import register_provider
 from providers.base import ProviderProfile
+
+
+def _bridge_server():
+    """Import the bridge server module from the active profile's HERMES_HOME.
+
+    Hermes already ships a top-level ``tools`` package, so putting the bridge
+    root on ``sys.path`` never makes ``tools.antigravity_bridge`` importable.
+    Extend that package's ``__path__`` instead.
+    """
+    import tools
+    from hermes_constants import get_hermes_home
+
+    tools_dir = get_hermes_home() / "bridge" / "antigravity" / "tools"
+    if tools_dir.is_dir() and str(tools_dir) not in tools.__path__:
+        tools.__path__.append(str(tools_dir))
+    from tools.antigravity_bridge import server
+
+    return server
 
 
 class AntigravityProfile(ProviderProfile):
@@ -26,13 +43,7 @@ class AntigravityProfile(ProviderProfile):
     ) -> dict[str, Any]:
         """Support reasoning/thinking config forwarding and auto-wake bridge daemon."""
         try:
-            from hermes_constants import get_hermes_home
-
-            bridge_root = get_hermes_home() / "bridge" / "antigravity"
-            if bridge_root.is_dir() and str(bridge_root) not in sys.path:
-                sys.path.insert(0, str(bridge_root))
-            from tools.antigravity_bridge.server import ensure_antigravity_bridge_running
-            if not ensure_antigravity_bridge_running():
+            if not _bridge_server().ensure_antigravity_bridge_running():
                 logging.getLogger(__name__).warning("Antigravity bridge is not ready; check local login and bridge status")
         except Exception as exc:
             logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
@@ -47,13 +58,7 @@ class ClaudeCodeCliProfile(ProviderProfile):
 
     def build_extra_body(self, **context: Any) -> dict[str, Any]:
         try:
-            from hermes_constants import get_hermes_home
-
-            bridge_root = get_hermes_home() / "bridge" / "antigravity"
-            if bridge_root.is_dir() and str(bridge_root) not in sys.path:
-                sys.path.insert(0, str(bridge_root))
-            from tools.antigravity_bridge.server import ensure_claude_code_bridge_running
-            if not ensure_claude_code_bridge_running():
+            if not _bridge_server().ensure_claude_code_bridge_running():
                 logging.getLogger(__name__).warning("Claude bridge is not ready; check local bridge status")
         except Exception as exc:
             logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
@@ -69,13 +74,7 @@ class CodexCliProfile(ProviderProfile):
 
     def build_extra_body(self, **context: Any) -> dict[str, Any]:
         try:
-            from hermes_constants import get_hermes_home
-
-            bridge_root = get_hermes_home() / "bridge" / "antigravity"
-            if bridge_root.is_dir() and str(bridge_root) not in sys.path:
-                sys.path.insert(0, str(bridge_root))
-            from tools.antigravity_bridge.server import ensure_codex_bridge_running
-            if not ensure_codex_bridge_running():
+            if not _bridge_server().ensure_codex_bridge_running():
                 logging.getLogger(__name__).warning("Codex bridge is not ready; check local bridge status")
         except Exception as exc:
             logging.getLogger(__name__).warning("Bridge auto-start failed (%s); inspect local installation", type(exc).__name__)
